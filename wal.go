@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"github.com/valyala/bytebufferpool"
 )
 
 const (
@@ -44,14 +46,14 @@ type WAL struct {
 }
 
 func NewWAL(path string) (*WAL, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
 	}
 
 	w := &WAL{
-		file:  f,
 		Path:  path,
+		file:  file,
 		queue: make(chan appendRequest, 1024),
 		stop:  make(chan struct{}),
 	}
@@ -107,7 +109,7 @@ func (w *WAL) flushBatch(batch *[]chan error) {
 }
 
 func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
-	if opType > OpDelete {
+	if opType != OpSet && opType != OpDelete {
 		return ErrInvalidOpType
 	}
 	if len(key) == 0 {
@@ -117,7 +119,12 @@ func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
 	keyLen, valLen := len(key), len(val)
 	totalSize := headerSize + keyLen + valLen
 
-	buf := make([]byte, totalSize)
+	bb := bytebufferpool.Get()
+	defer bytebufferpool.Put(bb)
+	if delta := totalSize - len(bb.B); delta > 0 {
+		bb.B = append(bb.B, make([]byte, delta)...)
+	}
+	buf := bb.B[:totalSize]
 
 	buf[typeOffset] = opType
 	binary.BigEndian.PutUint64(buf[timestampOffset:], uint64(time.Now().UnixNano()))
@@ -138,16 +145,16 @@ func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
 }
 
 func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
-	// _, err := w.file.Seek(0, 0)
-	// if err != nil {
-	// 	return func() (uint8, []byte, []byte, error) {
-	// 		return 0, nil, nil, err
-	// 	}
-	// }
+	file, err := os.Open(w.Path)
+	if err != nil {
+		return func() (uint8, []byte, []byte, error) {
+			return 0, nil, nil, err
+		}
+	}
 
 	next := func() (uint8, []byte, []byte, error) {
 		header := make([]byte, headerSize)
-		_, err := io.ReadFull(w.file, header)
+		_, err := io.ReadFull(file, header)
 		if err == io.EOF {
 			return 0, nil, nil, io.EOF
 		}
@@ -161,7 +168,7 @@ func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
 		opType := header[typeOffset]
 
 		payload := make([]byte, keyLen+valLen)
-		if _, err := io.ReadFull(w.file, payload); err != nil {
+		if _, err := io.ReadFull(file, payload); err != nil {
 			return 0, nil, nil, err
 		}
 
@@ -181,5 +188,6 @@ func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
 }
 
 func (w *WAL) Close() error {
+	close(w.stop)
 	return w.file.Close()
 }
