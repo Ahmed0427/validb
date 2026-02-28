@@ -1,14 +1,13 @@
 package validb
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"io"
 	"os"
 	"time"
-
-	"github.com/valyala/bytebufferpool"
 )
 
 const (
@@ -39,10 +38,11 @@ type appendRequest struct {
 }
 
 type WAL struct {
-	Path  string
-	file  *os.File
-	queue chan appendRequest
-	stop  chan struct{}
+	Path   string
+	file   *os.File
+	writer *bufio.Writer
+	queue  chan appendRequest
+	stop   chan struct{}
 }
 
 func NewWAL(path string) (*WAL, error) {
@@ -52,10 +52,11 @@ func NewWAL(path string) (*WAL, error) {
 	}
 
 	w := &WAL{
-		Path:  path,
-		file:  file,
-		queue: make(chan appendRequest, 1024),
-		stop:  make(chan struct{}),
+		Path:   path,
+		file:   file,
+		writer: bufio.NewWriterSize(file, 64*1024),
+		queue:  make(chan appendRequest, 1024),
+		stop:   make(chan struct{}),
 	}
 
 	go w.runFlusher()
@@ -101,7 +102,10 @@ func (w *WAL) flushBatch(batch *[]chan error) {
 	if len(*batch) == 0 {
 		return
 	}
-	err := w.file.Sync()
+	err := w.writer.Flush()
+	if err != nil {
+		err = w.file.Sync()
+	}
 	for _, ch := range *batch {
 		ch <- err
 	}
@@ -116,28 +120,27 @@ func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
 		return ErrKeyIsNil
 	}
 
-	keyLen, valLen := len(key), len(val)
-	totalSize := headerSize + keyLen + valLen
+	var hBuf [headerSize]byte
+	hBuf[typeOffset] = opType
+	binary.BigEndian.PutUint64(hBuf[timestampOffset:], uint64(time.Now().UnixNano()))
+	binary.BigEndian.PutUint32(hBuf[keyLenOffset:], uint32(len(key)))
+	binary.BigEndian.PutUint32(hBuf[valLenOffset:], uint32(len(val)))
 
-	bb := bytebufferpool.Get()
-	defer bytebufferpool.Put(bb)
-	if delta := totalSize - len(bb.B); delta > 0 {
-		bb.B = append(bb.B, make([]byte, delta)...)
+	digest := crc32.NewIEEE()
+	digest.Write(hBuf[typeOffset:])
+	digest.Write(key)
+	digest.Write(val)
+	checksum := digest.Sum32()
+
+	binary.BigEndian.PutUint32(hBuf[crcOffset:], checksum)
+
+	if _, err := w.writer.Write(hBuf[:]); err != nil {
+		return err
 	}
-	buf := bb.B[:totalSize]
-
-	buf[typeOffset] = opType
-	binary.BigEndian.PutUint64(buf[timestampOffset:], uint64(time.Now().UnixNano()))
-	binary.BigEndian.PutUint32(buf[keyLenOffset:], uint32(keyLen))
-	binary.BigEndian.PutUint32(buf[valLenOffset:], uint32(valLen))
-
-	copy(buf[headerSize:], key)
-	copy(buf[headerSize+keyLen:], val)
-
-	checksum := crc32.ChecksumIEEE(buf[typeOffset:])
-	binary.BigEndian.PutUint32(buf[crcOffset:], checksum)
-
-	if _, err := w.file.Write(buf); err != nil {
+	if _, err := w.writer.Write(key); err != nil {
+		return err
+	}
+	if _, err := w.writer.Write(val); err != nil {
 		return err
 	}
 
@@ -145,16 +148,9 @@ func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
 }
 
 func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
-	file, err := os.Open(w.Path)
-	if err != nil {
-		return func() (uint8, []byte, []byte, error) {
-			return 0, nil, nil, err
-		}
-	}
-
 	next := func() (uint8, []byte, []byte, error) {
 		header := make([]byte, headerSize)
-		_, err := io.ReadFull(file, header)
+		_, err := io.ReadFull(w.file, header)
 		if err == io.EOF {
 			return 0, nil, nil, io.EOF
 		}
@@ -168,7 +164,7 @@ func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
 		opType := header[typeOffset]
 
 		payload := make([]byte, keyLen+valLen)
-		if _, err := io.ReadFull(file, payload); err != nil {
+		if _, err := io.ReadFull(w.file, payload); err != nil {
 			return 0, nil, nil, err
 		}
 
@@ -185,6 +181,13 @@ func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
 	}
 
 	return next
+}
+
+func (w *WAL) Clear() error {
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (w *WAL) Close() error {
