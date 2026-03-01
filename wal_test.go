@@ -218,16 +218,23 @@ func TestWALTimerFlush(t *testing.T) {
 	require.NoError(t, err)
 	defer wal.Close()
 
-	// Append only ONE record. This won't trigger the 1000-count batch flush.
+	// append only one record. this won't trigger the 1000-count batch flush.
 	err = wal.Append(OpSet, []byte("timer-key"), []byte("timer-val"))
 	require.NoError(t, err)
 
-	// Wait for the ticker (10ms) + a little buffer
+	// wait for the ticker (10ms) + a little buffer
 	time.Sleep(50 * time.Millisecond)
 
 	info, err := os.Stat(tmpFile)
 	require.NoError(t, err)
-	assert.Greater(t, info.Size(), int64(0), "File should have been flushed by the ticker")
+	assert.Greater(t, info.Size(), int64(0))
+
+	// test clear/truncate
+	wal.Clear()
+	time.Sleep(50 * time.Millisecond)
+	info, err = os.Stat(tmpFile)
+	require.NoError(t, err)
+	assert.Equal(t, info.Size(), int64(0))
 }
 
 func TestWALValidation(t *testing.T) {
