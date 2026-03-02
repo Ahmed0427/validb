@@ -15,6 +15,14 @@ const (
 	OpDelete
 )
 
+const (
+	DefaultWriteBufferSize = 64 * 1024
+	MaxQueueSize           = 1024
+	MaxBatchSize           = 1000
+	FlushInterval          = 10 * time.Millisecond
+	DefaultFilePerm        = 0644
+)
+
 var (
 	ErrKeyIsNil      = errors.New("key is nil")
 	ErrWALCorrupted  = errors.New("WAL file corrupted")
@@ -46,7 +54,7 @@ type WAL struct {
 }
 
 func NewWAL(path string) (*WAL, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, DefaultFilePerm)
 	if err != nil {
 		return nil, err
 	}
@@ -54,8 +62,8 @@ func NewWAL(path string) (*WAL, error) {
 	w := &WAL{
 		Path:   path,
 		file:   file,
-		writer: bufio.NewWriterSize(file, 64*1024),
-		queue:  make(chan appendRequest, 1024),
+		writer: bufio.NewWriterSize(file, DefaultWriteBufferSize),
+		queue:  make(chan appendRequest, MaxQueueSize),
 		stop:   make(chan struct{}),
 	}
 
@@ -70,7 +78,7 @@ func (w *WAL) Append(opType uint8, key, val []byte) error {
 }
 
 func (w *WAL) runFlusher() {
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(FlushInterval)
 	defer ticker.Stop()
 
 	var batch []chan error
@@ -85,7 +93,7 @@ func (w *WAL) runFlusher() {
 			}
 			batch = append(batch, req.errChan)
 
-			if len(batch) >= 1000 {
+			if len(batch) >= MaxBatchSize {
 				w.flushBatch(&batch)
 			}
 
