@@ -78,6 +78,13 @@ func (m *MemTable) ForEach(fn func(key, value []byte) bool) {
 		}
 	}
 }
+
+func (m *MemTable) Size() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.list.Len()
+}
+
 func (m *MemTable) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

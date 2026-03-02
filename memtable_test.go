@@ -21,6 +21,24 @@ func TestMemTableBasicSetGet(t *testing.T) {
 	assert.Equal(t, val, retrieved)
 }
 
+func TestMemTableSetNil(t *testing.T) {
+	mt := NewMemTable(1024)
+
+	key1 := []byte("user:1")
+
+	mt.Set(key1, nil)
+	val, ok := mt.Get(key1)
+	require.True(t, ok)
+	assert.Nil(t, val)
+
+	key2 := []byte("user:2")
+
+	mt.Set(key2, []byte{})
+	val, ok = mt.Get(key2)
+	require.True(t, ok)
+	assert.NotNil(t, val)
+}
+
 func TestMemTableUpdateAndSize(t *testing.T) {
 	mt := NewMemTable(20)
 	key := []byte("k")
@@ -47,8 +65,10 @@ func TestMemTableOrdering(t *testing.T) {
 	mt.Set([]byte("a"), []byte("1"))
 	mt.Set([]byte("b"), []byte("2"))
 
+	require.Equal(t, mt.Size(), 3)
+
 	entries := mt.AllEntries()
-	require.Len(t, entries, 3)
+	require.Equal(t, mt.Size(), len(entries))
 
 	assert.Equal(t, []byte("a"), entries[0].Key)
 	assert.Equal(t, []byte("b"), entries[1].Key)
