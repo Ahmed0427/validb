@@ -27,13 +27,13 @@ func TestMemTableUpdateAndSize(t *testing.T) {
 	val1 := []byte("v1")
 
 	mt.Set(key, val1)
-	assert.Equal(t, int64(3), mt.byteSize)
+	assert.Equal(t, 3, mt.byteSize)
 	assert.False(t, mt.IsFull())
 
 	val2 := []byte("value_two")
 	mt.Set(key, val2)
 
-	assert.Equal(t, int64(10), mt.byteSize, "Size should reflect the new value length only")
+	assert.Equal(t, 10, mt.byteSize, "Size should reflect the new value length only")
 
 	val, ok := mt.Get(key)
 	assert.True(t, ok)
@@ -56,7 +56,7 @@ func TestMemTableOrdering(t *testing.T) {
 }
 
 func TestMemTableIsFull(t *testing.T) {
-	threshold := int64(10)
+	threshold := 10
 	mt := NewMemTable(threshold)
 
 	mt.Set([]byte("1234"), []byte("567890"))
@@ -73,7 +73,7 @@ func TestMemTableReset(t *testing.T) {
 
 	mt.Reset()
 
-	assert.Equal(t, int64(0), mt.byteSize)
+	assert.Equal(t, 0, mt.byteSize)
 	assert.Equal(t, 0, mt.list.Len())
 
 	_, ok := mt.Get([]byte("key"))
@@ -126,5 +126,5 @@ func TestMemTable_RaceConditionStress(t *testing.T) {
 
 	// Final sanity check: If we didn't crash or hang, we passed the deadlock test.
 	// If 'go test -race' is clean, we passed the race test.
-	assert.GreaterOrEqual(t, mt.byteSize, int64(0))
+	assert.GreaterOrEqual(t, mt.byteSize, 0)
 }

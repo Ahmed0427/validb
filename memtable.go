@@ -13,12 +13,12 @@ type Entry struct {
 
 type MemTable struct {
 	list      *skiplist.SkipList
-	byteSize  int64
-	threshold int64
+	byteSize  int
+	threshold int
 	mu        sync.RWMutex
 }
 
-func NewMemTable(thresholdBytes int64) *MemTable {
+func NewMemTable(thresholdBytes int) *MemTable {
 	return &MemTable{
 		list:      skiplist.New(skiplist.Bytes),
 		threshold: thresholdBytes,
@@ -29,11 +29,11 @@ func NewMemTable(thresholdBytes int64) *MemTable {
 func (m *MemTable) Set(key, value []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	newEntrySize := int64(len(key) + len(value))
+	newEntrySize := len(key) + len(value)
 
 	if oldElem := m.list.Get(key); oldElem != nil {
 		oldVal := oldElem.Value.([]byte)
-		m.byteSize -= int64(len(key) + len(oldVal))
+		m.byteSize -= len(key) + len(oldVal)
 	}
 
 	m.list.Set(key, value)
