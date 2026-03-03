@@ -78,7 +78,7 @@ func TestWALCorruption(t *testing.T) {
 	next := wal.NewIterator()
 
 	_, _, _, err = next()
-	assert.ErrorIs(t, err, ErrWALCorrupted)
+	assert.ErrorIs(t, err, ErrCorruptedWAL)
 }
 
 func TestWALTornWrite(t *testing.T) {
@@ -245,7 +245,7 @@ func TestWALValidation(t *testing.T) {
 
 	t.Run("NilKey", func(t *testing.T) {
 		err := wal.Append(OpSet, nil, []byte("val"))
-		assert.ErrorIs(t, err, ErrKeyIsNil)
+		assert.ErrorIs(t, err, ErrKeyIsEmpty)
 	})
 
 	t.Run("InvalidOp", func(t *testing.T) {

@@ -17,15 +17,15 @@ const (
 
 const (
 	DefaultWriteBufferSize = 64 * 1024
-	MaxQueueSize           = 1024
-	MaxBatchSize           = 1000
-	FlushInterval          = 10 * time.Millisecond
+	DefaultMaxQueueSize    = 1024
+	DefaultMaxBatchSize    = 1000 // Stay < MaxQueueSize to avoid blocking
+	DefaultFlushInterval   = 10 * time.Millisecond
 	DefaultFilePerm        = 0644
 )
 
 var (
-	ErrKeyIsNil      = errors.New("key is nil")
-	ErrWALCorrupted  = errors.New("WAL file corrupted")
+	ErrKeyIsEmpty    = errors.New("key is empty or nil")
+	ErrCorruptedWAL  = errors.New("WAL file is corrupted")
 	ErrInvalidOpType = errors.New("invalid operation type")
 )
 
@@ -63,7 +63,7 @@ func NewWAL(path string) (*WAL, error) {
 		Path:   path,
 		file:   file,
 		writer: bufio.NewWriterSize(file, DefaultWriteBufferSize),
-		queue:  make(chan appendRequest, MaxQueueSize),
+		queue:  make(chan appendRequest, DefaultMaxQueueSize),
 		stop:   make(chan struct{}),
 	}
 
@@ -78,7 +78,7 @@ func (w *WAL) Append(opType uint8, key, val []byte) error {
 }
 
 func (w *WAL) runFlusher() {
-	ticker := time.NewTicker(FlushInterval)
+	ticker := time.NewTicker(DefaultFlushInterval)
 	defer ticker.Stop()
 
 	var batch []chan error
@@ -93,7 +93,7 @@ func (w *WAL) runFlusher() {
 			}
 			batch = append(batch, req.errChan)
 
-			if len(batch) >= MaxBatchSize {
+			if len(batch) >= DefaultMaxBatchSize {
 				w.flushBatch(&batch)
 			}
 
@@ -125,7 +125,7 @@ func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
 		return ErrInvalidOpType
 	}
 	if len(key) == 0 {
-		return ErrKeyIsNil
+		return ErrKeyIsEmpty
 	}
 
 	var hBuf [headerSize]byte
@@ -182,7 +182,7 @@ func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
 		actualCRC := h.Sum32()
 
 		if storedCRC != actualCRC {
-			return 0, nil, nil, ErrWALCorrupted
+			return 0, nil, nil, ErrCorruptedWAL
 		}
 
 		return opType, payload[:keyLen], payload[keyLen:], nil
