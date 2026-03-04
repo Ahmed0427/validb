@@ -11,6 +11,43 @@ import (
 	"github.com/bits-and-blooms/bloom"
 )
 
+/*
+SSTable File Layout:
+-------------------------------------------------------------------------
+| Data Block (Sorted Key-Value Pairs)                                   |
+|   - [KeyLen (4b)][ValueLen (4b)][Key (N bytes)][Value (M bytes)]      |
+|   - [KeyLen (4b)][ValueLen (4b)][Key (N bytes)][Value (M bytes)]      |
+|   ... (Repeating entries)                                             |
+-------------------------------------------------------------------------
+| Bloom Filter                                                          |
+|   - Serialized bits-and-blooms/bloom filter data                      |
+-------------------------------------------------------------------------
+| Sparse Index                                                          |
+|   - [KeyLen (4b)][Key (N bytes)][Offset (8b)]                         |
+|   - ... (Entries typically every 128 keys)                            |
+-------------------------------------------------------------------------
+| Footer (Fixed 20 bytes)                                               |
+|   - [Bloom Filter Offset (8 bytes)]                                   |
+|   - [Sparse Index Offset (8 bytes)]                                   |
+|   - [Magic Number (0xDEADBEEF) (4 bytes)]                             |
+-------------------------------------------------------------------------
+
+Format Details:
+1. Data Block: Contains the actual KV pairs sorted by key. A ValueLen
+   of 0xFFFFFFFF (MaxUint32) indicates a "tombstone" (deleted record).
+
+2. Bloom Filter: Used for fast membership testing to avoid unnecessary
+   disk I/O if a key definitely doesn't exist in this file.
+
+3. Sparse Index: Stores the key and file offset for every Nth record.
+   Allows the reader to binary search for a range and then scan a
+   small chunk of data.
+
+4. Footer: Located at the very end of the file. Since it has a fixed
+   size, the reader can seek to (FileSize - 20) to find the "map"
+   required to parse the rest of the file.
+*/
+
 const (
 	// footer: [BloomOffset(8)][IndexOffset(8)][MagicNumber(4)] = 20 bytes
 	FooterSize           = 20
