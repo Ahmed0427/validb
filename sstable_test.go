@@ -29,7 +29,7 @@ func TestSSTableFullLifecycle(t *testing.T) {
 
 	reader, err := OpenSSTable(path)
 	require.NoError(t, err)
-	defer reader.file.Close()
+	defer reader.Close()
 
 	t.Run("Retrieve Active Key", func(t *testing.T) {
 		val, found, err := reader.Get([]byte("user:1"))
@@ -72,7 +72,7 @@ func TestSSTableLargeVolume(t *testing.T) {
 	require.NoError(t, writer.WriteFromMemTable(mt))
 
 	reader, _ := OpenSSTable(path)
-	defer reader.file.Close()
+	defer reader.Close()
 
 	samples := []int{0, 127, 128, 129, 500, 1999}
 	for _, i := range samples {
@@ -99,7 +99,7 @@ func TestSSTableBloomFilterFalsePositives(t *testing.T) {
 	writer.WriteFromMemTable(mt)
 
 	reader, _ := OpenSSTable(path)
-	defer reader.file.Close()
+	defer reader.Close()
 
 	assert.True(
 		t,
@@ -136,7 +136,7 @@ func TestSSTableSparseIndexBoundaries(t *testing.T) {
 	writer.WriteFromMemTable(mt)
 
 	reader, _ := OpenSSTable(path)
-	defer reader.file.Close()
+	defer reader.Close()
 
 	assert.Equal(t, 3, len(reader.sparseIndex))
 

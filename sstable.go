@@ -318,3 +318,7 @@ func (r *SSTableReader) scanData(offset int64, targetKey []byte) ([]byte, bool, 
 	}
 	return nil, false, nil
 }
+
+func (r *SSTableReader) Close() error {
+	return r.file.Close()
+}
