@@ -319,6 +319,48 @@ func (r *SSTableReader) scanData(offset int64, targetKey []byte) ([]byte, bool, 
 	return nil, false, nil
 }
 
+func (r *SSTableReader) ForEach(fn func(key, value []byte) bool) error {
+	offset := int64(0)
+	for offset < r.dataEnd {
+		header := make([]byte, 8)
+		if _, err := r.file.ReadAt(header, offset); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		kLen := binary.BigEndian.Uint32(header[:4])
+		vLen := binary.BigEndian.Uint32(header[4:])
+		offset += 8
+
+		keyBuf := make([]byte, kLen)
+		if _, err := r.file.ReadAt(keyBuf, offset); err != nil {
+			return err
+		}
+
+		if vLen == 0xFFFFFFFF {
+			if !fn(keyBuf, nil) {
+				break
+			}
+			vLen = 0
+		} else {
+			valBuf := make([]byte, vLen)
+			if _, err := r.file.ReadAt(valBuf, offset+int64(kLen)); err != nil {
+				return err
+			}
+
+			if !fn(keyBuf, valBuf) {
+				break
+			}
+
+		}
+		offset += int64(kLen + vLen)
+
+	}
+	return nil
+}
+
 func (r *SSTableReader) Close() error {
 	return r.file.Close()
 }
