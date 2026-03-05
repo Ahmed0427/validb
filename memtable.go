@@ -15,7 +15,7 @@ type MemTable struct {
 	list      *skiplist.SkipList
 	byteSize  int
 	threshold int
-	mu        sync.RWMutex
+	mu        sync.Mutex
 }
 
 func NewMemTable(thresholdBytes int) *MemTable {
@@ -41,8 +41,8 @@ func (m *MemTable) Set(key, value []byte) {
 }
 
 func (m *MemTable) Get(key []byte) ([]byte, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	val, ok := m.list.GetValue(key)
 	if !ok {
 		return nil, false
@@ -51,14 +51,14 @@ func (m *MemTable) Get(key []byte) ([]byte, bool) {
 }
 
 func (m *MemTable) IsFull() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.byteSize >= m.threshold
 }
 
 func (m *MemTable) AllEntries() []Entry {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	entries := make([]Entry, 0, m.list.Len())
 	for elem := m.list.Front(); elem != nil; elem = elem.Next() {
 		entries = append(entries, Entry{
@@ -70,8 +70,8 @@ func (m *MemTable) AllEntries() []Entry {
 }
 
 func (m *MemTable) ForEach(fn func(key, value []byte) bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for elem := m.list.Front(); elem != nil; elem = elem.Next() {
 		if !fn(elem.Key().([]byte), elem.Value.([]byte)) {
 			break // allow stopping early
@@ -80,8 +80,8 @@ func (m *MemTable) ForEach(fn func(key, value []byte) bool) {
 }
 
 func (m *MemTable) Size() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.list.Len()
 }
 
