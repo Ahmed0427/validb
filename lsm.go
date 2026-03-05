@@ -82,12 +82,10 @@ func (l *LSMTree) Get(key []byte) ([]byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// 1. Check MemTable
 	if val, ok := l.memTable.Get(key); ok {
 		return val, val != nil // nil is a tombstone
 	}
 
-	// 2. Check SSTables
 	return l.searchSSTables(key)
 }
 
@@ -187,4 +185,13 @@ func (l *LSMTree) searchSSTables(key []byte) ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (l *LSMTree) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.memTable.Size() > 0 {
+		return l.flushMemTable()
+	}
+	return l.wal.Close()
 }
