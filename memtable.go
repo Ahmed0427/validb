@@ -85,6 +85,12 @@ func (m *MemTable) Size() int {
 	return m.list.Len()
 }
 
+func (m *MemTable) Remove(key []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.list.Remove(key)
+}
+
 func (m *MemTable) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

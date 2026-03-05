@@ -12,7 +12,7 @@ import (
 func TestMemTableBasicSetGet(t *testing.T) {
 	mt := NewMemTable(1024)
 	key := []byte("user:123")
-	val := []byte("gemini")
+	val := []byte("value")
 
 	mt.Set(key, val)
 
@@ -85,6 +85,23 @@ func TestMemTableIsFull(t *testing.T) {
 
 	mt.Set([]byte("a"), []byte("b"))
 	assert.True(t, mt.IsFull())
+}
+
+func TestMemTableRemove(t *testing.T) {
+	mt := NewMemTable(1024)
+	key := []byte("user:123")
+	val := []byte("value")
+
+	mt.Set(key, val)
+
+	retrieved, ok := mt.Get(key)
+	require.True(t, ok)
+	assert.Equal(t, val, retrieved)
+
+	mt.Remove(key)
+
+	retrieved, ok = mt.Get(key)
+	require.False(t, ok)
 }
 
 func TestMemTableReset(t *testing.T) {
