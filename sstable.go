@@ -319,47 +319,66 @@ func (r *SSTableReader) scanData(offset int64, targetKey []byte) ([]byte, bool, 
 	return nil, false, nil
 }
 
-func (r *SSTableReader) ForEach(fn func(key, value []byte) bool) error {
-	offset := int64(0)
-	for offset < r.dataEnd {
-		header := make([]byte, 8)
-		if _, err := r.file.ReadAt(header, offset); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
-
-		kLen := binary.BigEndian.Uint32(header[:4])
-		vLen := binary.BigEndian.Uint32(header[4:])
-		offset += 8
-
-		keyBuf := make([]byte, kLen)
-		if _, err := r.file.ReadAt(keyBuf, offset); err != nil {
-			return err
-		}
-
-		if vLen == 0xFFFFFFFF {
-			if !fn(keyBuf, nil) {
-				break
-			}
-			vLen = 0
-		} else {
-			valBuf := make([]byte, vLen)
-			if _, err := r.file.ReadAt(valBuf, offset+int64(kLen)); err != nil {
-				return err
-			}
-
-			if !fn(keyBuf, valBuf) {
-				break
-			}
-
-		}
-		offset += int64(kLen + vLen)
-
-	}
-	return nil
+type SSTableEntry struct {
+	key   []byte
+	value []byte
 }
+
+type SSTableIterator struct {
+	reader *SSTableReader
+	offset int64
+	ent    *SSTableEntry
+	err    error
+}
+
+func (r *SSTableReader) NewIterator() *SSTableIterator {
+	return &SSTableIterator{
+		reader: r,
+		offset: 0,
+	}
+}
+
+func (it *SSTableIterator) Next() bool {
+	if it.offset >= it.reader.dataEnd {
+		return false
+	}
+
+	header := make([]byte, 8)
+	if _, err := it.reader.file.ReadAt(header, it.offset); err != nil {
+		if err != io.EOF {
+			it.err = err
+		}
+		return false
+	}
+
+	kLen := binary.BigEndian.Uint32(header[:4])
+	vLen := binary.BigEndian.Uint32(header[4:])
+
+	entry := &SSTableEntry{}
+
+	entry.key = make([]byte, kLen)
+	if _, err := it.reader.file.ReadAt(entry.key, it.offset+8); err != nil {
+		it.err = err
+		return false
+	}
+
+	if vLen != 0xFFFFFFFF {
+		entry.value = make([]byte, vLen)
+		if _, err := it.reader.file.ReadAt(entry.value, it.offset+8+int64(kLen)); err != nil {
+			it.err = err
+			return false
+		}
+	} else {
+		vLen = 0
+	}
+
+	it.ent = entry
+	it.offset += 8 + int64(kLen) + int64(vLen)
+	return true
+}
+
+func (it *SSTableIterator) Entry() *SSTableEntry { return it.ent }
+func (it *SSTableIterator) Err() error           { return it.err }
 
 func (r *SSTableReader) Close() error {
 	return r.file.Close()

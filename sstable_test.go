@@ -1,7 +1,6 @@
 package validb
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"testing"
@@ -87,8 +86,8 @@ func TestSSTableLargeVolume(t *testing.T) {
 	}
 }
 
-func TestSSTableForEach(t *testing.T) {
-	tmpFile, _ := os.CreateTemp("", "validb_foreach")
+func TestSSTableIterator(t *testing.T) {
+	tmpFile, _ := os.CreateTemp("", "validb_iter")
 	path := tmpFile.Name()
 	defer os.Remove(path)
 	tmpFile.Close()
@@ -108,40 +107,48 @@ func TestSSTableForEach(t *testing.T) {
 	reader, _ := OpenSSTable(path)
 	defer reader.Close()
 
+	// Using the new Iterator
+	iter := reader.NewIterator()
 	i := 0
-	err := reader.ForEach(func(key, val []byte) bool {
-		originalKey := []byte(fmt.Sprintf("key-%05d", i))
-		originalVal := []byte(fmt.Sprintf("val-%05d", i))
-		assert.True(t, bytes.Compare(originalKey, key) == 0)
-		assert.True(t, bytes.Compare(originalVal, val) == 0)
-		i++
+	for iter.Next() {
+		entry := iter.Entry()
+		expectedKey := []byte(fmt.Sprintf("key-%05d", i))
+		expectedVal := []byte(fmt.Sprintf("val-%05d", i))
 
-		return true
-	})
-	require.Nil(t, err)
-	assert.Equal(t, i, count)
+		assert.Equal(t, expectedKey, entry.key)
+		assert.Equal(t, expectedVal, entry.value)
+		i++
+	}
+
+	require.NoError(t, iter.Err())
+	assert.Equal(t, count, i)
 }
 
-func TestSSTableForEachTombstones(t *testing.T) {
+func TestSSTableIteratorTombstones(t *testing.T) {
 	path := "test_tombstone.sst"
 	defer os.Remove(path)
 
 	mt := NewMemTable(1024)
 	mt.Set([]byte("key-1"), []byte("value-1"))
-	mt.Set([]byte("key-2"), nil)
+	mt.Set([]byte("key-2"), nil) // Tombstone
 
 	writer, _ := NewSSTableWriter(path, 2)
 	writer.WriteFromMemTable(mt)
 
 	reader, _ := OpenSSTable(path)
+	defer reader.Close()
 
+	iter := reader.NewIterator()
 	foundDeleted := false
-	reader.ForEach(func(key, val []byte) bool {
-		if string(key) == "key-2" && val == nil {
+
+	for iter.Next() {
+		entry := iter.Entry()
+		if string(entry.key) == "key-2" && entry.value == nil {
 			foundDeleted = true
 		}
-		return true
-	})
+	}
+
+	assert.NoError(t, iter.Err())
 	assert.True(t, foundDeleted)
 }
 
@@ -154,7 +161,6 @@ func TestSSTableTombstoneProgression(t *testing.T) {
 	mt.Set([]byte("key2"), nil)
 	mt.Set([]byte("key3"), []byte("val3"))
 
-	// Write it out
 	writer, _ := NewSSTableWriter(path, 3)
 	require.NoError(t, writer.WriteFromMemTable(mt))
 
@@ -162,12 +168,12 @@ func TestSSTableTombstoneProgression(t *testing.T) {
 	defer reader.Close()
 
 	var keysRead []string
-	err := reader.ForEach(func(k, v []byte) bool {
-		keysRead = append(keysRead, string(k))
-		return true
-	})
+	iter := reader.NewIterator()
+	for iter.Next() {
+		keysRead = append(keysRead, string(iter.Entry().key))
+	}
 
-	require.NoError(t, err)
+	require.NoError(t, iter.Err())
 	assert.Equal(t, 3, len(keysRead))
 	assert.Equal(t, "key3", keysRead[2])
 }
@@ -179,12 +185,12 @@ func TestSSTableHardSemantics(t *testing.T) {
 	tmpFile.Close()
 
 	mt := NewMemTable(1024)
-	mt.Set([]byte("c_deleted"), nil)
 	mt.Set([]byte("a_empty"), []byte(""))
 	mt.Set([]byte("b_data"), []byte("val"))
+	mt.Set([]byte("c_deleted"), nil)
 	mt.Set([]byte("d_last"), []byte("end"))
 
-	writer, _ := NewSSTableWriter(path, mt.Size())
+	writer, _ := NewSSTableWriter(path, 4)
 	require.NoError(t, writer.WriteFromMemTable(mt))
 
 	reader, _ := OpenSSTable(path)
@@ -193,27 +199,26 @@ func TestSSTableHardSemantics(t *testing.T) {
 	expectedKeys := []string{"a_empty", "b_data", "c_deleted", "d_last"}
 	idx := 0
 
-	err := reader.ForEach(func(k, v []byte) bool {
-		require.Less(t, idx, len(expectedKeys), "Read more keys than were written")
+	iter := reader.NewIterator()
+	for iter.Next() {
+		entry := iter.Entry()
+		require.Less(t, idx, len(expectedKeys))
+		assert.Equal(t, expectedKeys[idx], string(entry.key))
 
-		assert.Equal(t, expectedKeys[idx], string(k), "Keys out of order or missing")
-
-		switch string(k) {
+		switch string(entry.key) {
 		case "a_empty":
-			assert.NotNil(t, v, "Empty key should be non-nil []byte{}")
-			assert.Equal(t, 0, len(v))
+			assert.NotNil(t, entry.value)
+			assert.Equal(t, 0, len(entry.value))
 		case "c_deleted":
-			assert.Nil(t, v, "Tombstone key must be explicitly nil")
+			assert.Nil(t, entry.value, "Tombstone must be nil")
 		case "b_data", "d_last":
-			assert.NotNil(t, v)
-			assert.Greater(t, len(v), 0)
+			assert.NotNil(t, entry.value)
+			assert.Greater(t, len(entry.value), 0)
 		}
-
 		idx++
-		return true
-	})
+	}
 
-	require.NoError(t, err)
+	require.NoError(t, iter.Err())
 	assert.Equal(t, 4, idx)
 }
 
