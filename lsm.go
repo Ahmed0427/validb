@@ -1,6 +1,8 @@
 package validb
 
 import (
+	"bytes"
+	"container/heap"
 	"errors"
 	"fmt"
 	"io"
@@ -153,6 +155,40 @@ func (l *LSMTree) compactionWorker() {
 	}
 }
 
+type mergeItem struct {
+	key       []byte
+	value     []byte // nil == tombstone
+	readerIdx int
+}
+
+type mergeHeap []mergeItem
+
+func (h mergeHeap) Len() int { return len(h) }
+func (h mergeHeap) Less(i, j int) bool {
+	if cmp := bytes.Compare(h[i].key, h[j].key); cmp != 0 {
+		return cmp < 0
+	}
+	// same key: higher readeridx is newer, so it should come first (min-heap
+	// pops the smallest, so "smaller" here means "should be emitted first").
+	return h[i].readerIdx > h[j].readerIdx
+}
+
+func (h mergeHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *mergeHeap) Push(x interface{}) {
+	*h = append(*h, x.(mergeItem))
+}
+
+func (h *mergeHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
 func (l *LSMTree) compact(level int) {
 	if level >= l.levelMan.numLevels-1 {
 		return
@@ -167,20 +203,82 @@ func (l *LSMTree) compact(level int) {
 	}
 
 	readers := make([]*SSTableReader, 0, len(files))
+	iterators := make([]*SSTableIterator, len(readers))
 	for _, name := range files {
 		path := filepath.Join(l.basePath, name)
-		r, err := OpenSSTable(path)
+		r, err := openSSTable(path)
 		if err != nil {
 			continue
 		}
 		readers = append(readers, r)
+		iterators = append(iterators, r.newIterator())
 	}
 	defer func() {
 		for _, r := range readers {
-			r.Close()
+			r.close()
 		}
 	}()
 
+	h := &mergeHeap{}
+	heap.Init(h)
+
+	for i, it := range iterators {
+		if it.next() {
+			heap.Push(h, mergeItem{key: it.ent.key, value: it.ent.value, readerIdx: i})
+		}
+	}
+
+	newName := fmt.Sprintf("L%d_%d.sst", level+1, time.Now().UnixNano())
+	newPath := filepath.Join(l.basePath, newName)
+	w, err := newSSTableWriter(newPath, 0)
+	if err != nil {
+		return
+	}
+
+	var lastWrittenKey []byte = nil
+	for h.Len() > 0 {
+		item := heap.Pop(h).(mergeItem)
+		if ok := iterators[item.readerIdx].next(); ok {
+			heap.Push(h, mergeItem{
+				key:       iterators[item.readerIdx].ent.key,
+				value:     iterators[item.readerIdx].ent.value,
+				readerIdx: item.readerIdx,
+			})
+		}
+
+		if lastWrittenKey != nil && bytes.Equal(lastWrittenKey, item.key) {
+			continue
+		}
+
+		if err := w.writeEntry(item.key, item.value); err != nil {
+			w.close()
+			os.Remove(newPath)
+			return
+		}
+		lastWrittenKey = item.key
+	}
+
+	if err := w.writeMetadata(); err != nil {
+		w.close()
+		os.Remove(newPath)
+		return
+	}
+
+	l.mu.Lock()
+	for _, name := range files {
+		l.levelMan.remove(level, name)
+		os.Remove(filepath.Join(l.basePath, name))
+	}
+	l.levelMan.add(level+1, newName)
+	needNext := l.levelMan.needsCompaction(level + 1)
+	l.mu.Unlock()
+
+	if needNext {
+		select {
+		case l.compactCh <- level + 1:
+		default:
+		}
+	}
 }
 
 func (l *LSMTree) Set(key, value []byte) error {
@@ -265,11 +363,11 @@ func (l *LSMTree) flushMemTable() error {
 	name := fmt.Sprintf("L0_%d.sst", time.Now().UnixNano())
 	path := filepath.Join(l.basePath, name)
 
-	writer, err := NewSSTableWriter(path, l.memTable.Size())
+	writer, err := newSSTableWriter(path, l.memTable.Size())
 	if err != nil {
 		return err
 	}
-	if err := writer.WriteFromMemTable(l.memTable); err != nil {
+	if err := writer.writeFromMemTable(l.memTable); err != nil {
 		return err
 	}
 
@@ -292,13 +390,13 @@ func (l *LSMTree) searchSSTables(key []byte) ([]byte, bool) {
 	allFiles := l.levelMan.allFiles()
 	for _, name := range allFiles {
 		path := filepath.Join(l.basePath, name)
-		r, err := OpenSSTable(path)
+		r, err := openSSTable(path)
 		if err != nil {
 			continue
 		}
 
-		val, found, err := r.Get(key)
-		r.Close()
+		val, found, err := r.get(key)
+		r.close()
 
 		if err == nil && found {
 			return val, val != nil
