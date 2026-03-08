@@ -61,20 +61,20 @@ var (
 )
 
 type IndexEntry struct {
-	Key    []byte
-	Offset int64
+	key    []byte
+	offset int
 }
 
 type SSTableWriter struct {
 	file          *os.File
 	sparseIndex   []IndexEntry
 	bloomFilter   *bloom.BloomFilter
+	currentOffset int
 	indexInterval int
 	writtenCount  int
-	currentOffset int
 }
 
-func NewSSTableWriter(path string, expectedEntries int) (*SSTableWriter, error) {
+func newSSTableWriter(path string, expectedEntries int) (*SSTableWriter, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, err
@@ -87,10 +87,10 @@ func NewSSTableWriter(path string, expectedEntries int) (*SSTableWriter, error) 
 	}, nil
 }
 
-func (w *SSTableWriter) WriteFromMemTable(mt *MemTable) error {
+func (w *SSTableWriter) writeFromMemTable(mt *MemTable) error {
 	var writeErr error
 	mt.ForEach(func(key, value []byte) bool {
-		writeErr = w.WriteRecord(key, value)
+		writeErr = w.writeEntry(key, value)
 		return writeErr == nil
 	})
 
@@ -118,10 +118,10 @@ func (w *SSTableWriter) writeMetadata() error {
 	tmp := make([]byte, 12)
 
 	for _, entry := range w.sparseIndex {
-		binary.BigEndian.PutUint32(tmp[:4], uint32(len(entry.Key)))
+		binary.BigEndian.PutUint32(tmp[:4], uint32(len(entry.key)))
 		idxBuf.Write(tmp[:4])
-		idxBuf.Write(entry.Key)
-		binary.BigEndian.PutUint64(tmp[:8], uint64(entry.Offset))
+		idxBuf.Write(entry.key)
+		binary.BigEndian.PutUint64(tmp[:8], uint64(entry.offset))
 		idxBuf.Write(tmp[:8])
 	}
 	idxN, err := w.file.Write(idxBuf.Bytes())
@@ -160,13 +160,13 @@ func (w *SSTableWriter) writeKV(key, value []byte) (int, error) {
 	return w.file.Write(buf)
 }
 
-func (w *SSTableWriter) WriteRecord(key, value []byte) error {
+func (w *SSTableWriter) writeEntry(key, value []byte) error {
 	w.bloomFilter.Add(key)
 
 	if w.writtenCount%w.indexInterval == 0 {
 		w.sparseIndex = append(w.sparseIndex, IndexEntry{
-			Offset: int64(w.currentOffset),
-			Key:    key,
+			offset: w.currentOffset,
+			key:    key,
 		})
 	}
 
@@ -179,14 +179,18 @@ func (w *SSTableWriter) WriteRecord(key, value []byte) error {
 	return nil
 }
 
+func (w *SSTableWriter) close() error {
+	return w.file.Close()
+}
+
 type SSTableReader struct {
 	file        *os.File
 	sparseIndex []IndexEntry
 	bloomFilter *bloom.BloomFilter
-	dataEnd     int64
+	dataEnd     int
 }
 
-func OpenSSTable(path string) (*SSTableReader, error) {
+func openSSTable(path string) (*SSTableReader, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -207,12 +211,12 @@ func OpenSSTable(path string) (*SSTableReader, error) {
 		return nil, ErrInvalidMagicNumber
 	}
 
-	bloomOff := int64(binary.BigEndian.Uint64(footer[:8]))
-	indexOff := int64(binary.BigEndian.Uint64(footer[8:16]))
+	bloomOff := int(binary.BigEndian.Uint64(footer[:8]))
+	indexOff := int(binary.BigEndian.Uint64(footer[8:16]))
 
 	bloomLen := indexOff - bloomOff
 	bloomData := make([]byte, bloomLen)
-	if _, err := f.ReadAt(bloomData, bloomOff); err != nil {
+	if _, err := f.ReadAt(bloomData, int64(bloomOff)); err != nil {
 		return nil, err
 	}
 
@@ -221,9 +225,9 @@ func OpenSSTable(path string) (*SSTableReader, error) {
 		return nil, err
 	}
 
-	indexLen := (fileSize - FooterSize) - indexOff
+	indexLen := (fileSize - FooterSize) - int64(indexOff)
 	indexData := make([]byte, indexLen)
-	if _, err := f.ReadAt(indexData, indexOff); err != nil {
+	if _, err := f.ReadAt(indexData, int64(indexOff)); err != nil {
 		return nil, err
 	}
 	idx := deserializeIndex(indexData)
@@ -246,47 +250,47 @@ func deserializeIndex(data []byte) []IndexEntry {
 		key := data[cursor : cursor+kLen]
 		cursor += kLen
 
-		offset := int64(binary.BigEndian.Uint64(data[cursor : cursor+8]))
+		offset := int(binary.BigEndian.Uint64(data[cursor : cursor+8]))
 		cursor += 8
 
 		index = append(index, IndexEntry{
-			Key:    key,
-			Offset: offset,
+			key:    key,
+			offset: offset,
 		})
 	}
 	return index
 }
 
-func (r *SSTableReader) Get(key []byte) ([]byte, bool, error) {
+func (r *SSTableReader) get(key []byte) ([]byte, bool, error) {
 	if !r.bloomFilter.Test(key) {
 		return nil, false, nil
 	}
 
 	idx := sort.Search(len(r.sparseIndex), func(i int) bool {
-		return bytes.Compare(r.sparseIndex[i].Key, key) >= 0
+		return bytes.Compare(r.sparseIndex[i].key, key) >= 0
 	})
 
-	startOffset := int64(0)
+	startOffset := 0
 	if idx > 0 {
 		// If sort.Search finds an exact match at idx, we start there.
 		// If it finds a key larger than our target, we must start from the previous block.
-		if idx < len(r.sparseIndex) && bytes.Compare(r.sparseIndex[idx].Key, key) == 0 {
-			startOffset = r.sparseIndex[idx].Offset
+		if idx < len(r.sparseIndex) && bytes.Compare(r.sparseIndex[idx].key, key) == 0 {
+			startOffset = r.sparseIndex[idx].offset
 		} else {
-			startOffset = r.sparseIndex[idx-1].Offset
+			startOffset = r.sparseIndex[idx-1].offset
 		}
 	} else if len(r.sparseIndex) > 0 {
 		// If idx == 0, the key is either in the first block or doesn't exist.
-		startOffset = r.sparseIndex[0].Offset
+		startOffset = r.sparseIndex[0].offset
 	}
 
 	return r.scanData(startOffset, key)
 }
 
-func (r *SSTableReader) scanData(offset int64, targetKey []byte) ([]byte, bool, error) {
+func (r *SSTableReader) scanData(offset int, targetKey []byte) ([]byte, bool, error) {
 	for offset < r.dataEnd {
 		header := make([]byte, 8)
-		if _, err := r.file.ReadAt(header, offset); err != nil {
+		if _, err := r.file.ReadAt(header, int64(offset)); err != nil {
 			if err == io.EOF {
 				break
 			}
@@ -299,7 +303,7 @@ func (r *SSTableReader) scanData(offset int64, targetKey []byte) ([]byte, bool, 
 
 		// Read Key
 		keyBuf := make([]byte, kLen)
-		if _, err := r.file.ReadAt(keyBuf, offset); err != nil {
+		if _, err := r.file.ReadAt(keyBuf, int64(offset)); err != nil {
 			return nil, false, err
 		}
 
@@ -313,7 +317,7 @@ func (r *SSTableReader) scanData(offset int64, targetKey []byte) ([]byte, bool, 
 
 			// found it - read value
 			valBuf := make([]byte, vLen)
-			if _, err := r.file.ReadAt(valBuf, offset+int64(kLen)); err != nil {
+			if _, err := r.file.ReadAt(valBuf, int64(offset+int(kLen))); err != nil {
 				return nil, false, err
 			}
 			return valBuf, true, nil
@@ -324,7 +328,7 @@ func (r *SSTableReader) scanData(offset int64, targetKey []byte) ([]byte, bool, 
 			break
 		}
 
-		offset += int64(kLen + vLen)
+		offset += int(kLen + vLen)
 	}
 	return nil, false, nil
 }
@@ -336,25 +340,25 @@ type SSTableEntry struct {
 
 type SSTableIterator struct {
 	reader *SSTableReader
-	offset int64
+	offset int
 	ent    *SSTableEntry
 	err    error
 }
 
-func (r *SSTableReader) NewIterator() *SSTableIterator {
+func (r *SSTableReader) newIterator() *SSTableIterator {
 	return &SSTableIterator{
 		reader: r,
 		offset: 0,
 	}
 }
 
-func (it *SSTableIterator) Next() bool {
+func (it *SSTableIterator) next() bool {
 	if it.offset >= it.reader.dataEnd {
 		return false
 	}
 
 	header := make([]byte, 8)
-	if _, err := it.reader.file.ReadAt(header, it.offset); err != nil {
+	if _, err := it.reader.file.ReadAt(header, int64(it.offset)); err != nil {
 		if err != io.EOF {
 			it.err = err
 		}
@@ -367,14 +371,15 @@ func (it *SSTableIterator) Next() bool {
 	entry := &SSTableEntry{}
 
 	entry.key = make([]byte, kLen)
-	if _, err := it.reader.file.ReadAt(entry.key, it.offset+8); err != nil {
+	if _, err := it.reader.file.ReadAt(entry.key, int64(it.offset+8)); err != nil {
 		it.err = err
 		return false
 	}
 
 	if vLen != 0xFFFFFFFF {
 		entry.value = make([]byte, vLen)
-		if _, err := it.reader.file.ReadAt(entry.value, it.offset+8+int64(kLen)); err != nil {
+		_, err := it.reader.file.ReadAt(entry.value, int64(it.offset+8+int(kLen)))
+		if err != nil {
 			it.err = err
 			return false
 		}
@@ -383,13 +388,10 @@ func (it *SSTableIterator) Next() bool {
 	}
 
 	it.ent = entry
-	it.offset += 8 + int64(kLen) + int64(vLen)
+	it.offset += 8 + int(kLen+vLen)
 	return true
 }
 
-func (it *SSTableIterator) Entry() *SSTableEntry { return it.ent }
-func (it *SSTableIterator) Err() error           { return it.err }
-
-func (r *SSTableReader) Close() error {
+func (r *SSTableReader) close() error {
 	return r.file.Close()
 }

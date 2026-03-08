@@ -22,31 +22,31 @@ func TestSSTableFullLifecycle(t *testing.T) {
 	mt.Set([]byte("user:3"), []byte("Charlie"))
 	mt.Set([]byte("user:2"), nil) // Delete Bob (Tombstone)
 
-	writer, err := NewSSTableWriter(path, mt.Size())
+	writer, err := newSSTableWriter(path, mt.Size())
 	require.NoError(t, err)
-	err = writer.WriteFromMemTable(mt)
+	err = writer.writeFromMemTable(mt)
 	require.NoError(t, err)
 
-	reader, err := OpenSSTable(path)
+	reader, err := openSSTable(path)
 	require.NoError(t, err)
-	defer reader.Close()
+	defer reader.close()
 
 	t.Run("Retrieve Active Key", func(t *testing.T) {
-		val, found, err := reader.Get([]byte("user:1"))
+		val, found, err := reader.get([]byte("user:1"))
 		assert.NoError(t, err)
 		assert.True(t, found)
 		assert.Equal(t, []byte("Alice"), val)
 	})
 
 	t.Run("Handle Tombstone Persistence", func(t *testing.T) {
-		val, found, err := reader.Get([]byte("user:2"))
+		val, found, err := reader.get([]byte("user:2"))
 		assert.NoError(t, err)
 		assert.True(t, found, "Tombstone should be found to prevent checking older levels")
 		assert.Nil(t, val, "Tombstone value should be nil")
 	})
 
 	t.Run("Non-Existent Key", func(t *testing.T) {
-		val, found, err := reader.Get([]byte("user:99"))
+		val, found, err := reader.get([]byte("user:99"))
 		assert.NoError(t, err)
 		assert.False(t, found)
 		assert.Nil(t, val)
@@ -68,18 +68,18 @@ func TestSSTableLargeVolume(t *testing.T) {
 		mt.Set(key, val)
 	}
 
-	writer, _ := NewSSTableWriter(path, count)
-	require.NoError(t, writer.WriteFromMemTable(mt))
+	writer, _ := newSSTableWriter(path, count)
+	require.NoError(t, writer.writeFromMemTable(mt))
 
-	reader, _ := OpenSSTable(path)
-	defer reader.Close()
+	reader, _ := openSSTable(path)
+	defer reader.close()
 
 	samples := []int{0, 127, 128, 129, 500, 1999}
 	for _, i := range samples {
 		key := []byte(fmt.Sprintf("key-%05d", i))
 		expected := []byte(fmt.Sprintf("val-%05d", i))
 
-		val, found, err := reader.Get(key)
+		val, found, err := reader.get(key)
 		assert.NoError(t, err)
 		assert.True(t, found, "Failed at index %d", i)
 		assert.Equal(t, expected, val)
@@ -101,17 +101,17 @@ func TestSSTableIterator(t *testing.T) {
 		mt.Set(key, val)
 	}
 
-	writer, _ := NewSSTableWriter(path, count)
-	require.NoError(t, writer.WriteFromMemTable(mt))
+	writer, _ := newSSTableWriter(path, count)
+	require.NoError(t, writer.writeFromMemTable(mt))
 
-	reader, _ := OpenSSTable(path)
-	defer reader.Close()
+	reader, _ := openSSTable(path)
+	defer reader.close()
 
 	// Using the new Iterator
-	iter := reader.NewIterator()
+	iter := reader.newIterator()
 	i := 0
-	for iter.Next() {
-		entry := iter.Entry()
+	for iter.next() {
+		entry := iter.ent
 		expectedKey := []byte(fmt.Sprintf("key-%05d", i))
 		expectedVal := []byte(fmt.Sprintf("val-%05d", i))
 
@@ -120,7 +120,7 @@ func TestSSTableIterator(t *testing.T) {
 		i++
 	}
 
-	require.NoError(t, iter.Err())
+	require.NoError(t, iter.err)
 	assert.Equal(t, count, i)
 }
 
@@ -132,23 +132,23 @@ func TestSSTableIteratorTombstones(t *testing.T) {
 	mt.Set([]byte("key-1"), []byte("value-1"))
 	mt.Set([]byte("key-2"), nil) // Tombstone
 
-	writer, _ := NewSSTableWriter(path, 2)
-	writer.WriteFromMemTable(mt)
+	writer, _ := newSSTableWriter(path, 2)
+	writer.writeFromMemTable(mt)
 
-	reader, _ := OpenSSTable(path)
-	defer reader.Close()
+	reader, _ := openSSTable(path)
+	defer reader.close()
 
-	iter := reader.NewIterator()
+	iter := reader.newIterator()
 	foundDeleted := false
 
-	for iter.Next() {
-		entry := iter.Entry()
+	for iter.next() {
+		entry := iter.ent
 		if string(entry.key) == "key-2" && entry.value == nil {
 			foundDeleted = true
 		}
 	}
 
-	assert.NoError(t, iter.Err())
+	assert.NoError(t, iter.err)
 	assert.True(t, foundDeleted)
 }
 
@@ -161,19 +161,19 @@ func TestSSTableTombstoneProgression(t *testing.T) {
 	mt.Set([]byte("key2"), nil)
 	mt.Set([]byte("key3"), []byte("val3"))
 
-	writer, _ := NewSSTableWriter(path, 3)
-	require.NoError(t, writer.WriteFromMemTable(mt))
+	writer, _ := newSSTableWriter(path, 3)
+	require.NoError(t, writer.writeFromMemTable(mt))
 
-	reader, _ := OpenSSTable(path)
-	defer reader.Close()
+	reader, _ := openSSTable(path)
+	defer reader.close()
 
 	var keysRead []string
-	iter := reader.NewIterator()
-	for iter.Next() {
-		keysRead = append(keysRead, string(iter.Entry().key))
+	iter := reader.newIterator()
+	for iter.next() {
+		keysRead = append(keysRead, string(iter.ent.key))
 	}
 
-	require.NoError(t, iter.Err())
+	require.NoError(t, iter.err)
 	assert.Equal(t, 3, len(keysRead))
 	assert.Equal(t, "key3", keysRead[2])
 }
@@ -190,18 +190,18 @@ func TestSSTableHardSemantics(t *testing.T) {
 	mt.Set([]byte("c_deleted"), nil)
 	mt.Set([]byte("d_last"), []byte("end"))
 
-	writer, _ := NewSSTableWriter(path, 4)
-	require.NoError(t, writer.WriteFromMemTable(mt))
+	writer, _ := newSSTableWriter(path, 4)
+	require.NoError(t, writer.writeFromMemTable(mt))
 
-	reader, _ := OpenSSTable(path)
-	defer reader.Close()
+	reader, _ := openSSTable(path)
+	defer reader.close()
 
 	expectedKeys := []string{"a_empty", "b_data", "c_deleted", "d_last"}
 	idx := 0
 
-	iter := reader.NewIterator()
-	for iter.Next() {
-		entry := iter.Entry()
+	iter := reader.newIterator()
+	for iter.next() {
+		entry := iter.ent
 		require.Less(t, idx, len(expectedKeys))
 		assert.Equal(t, expectedKeys[idx], string(entry.key))
 
@@ -218,7 +218,7 @@ func TestSSTableHardSemantics(t *testing.T) {
 		idx++
 	}
 
-	require.NoError(t, iter.Err())
+	require.NoError(t, iter.err)
 	assert.Equal(t, 4, idx)
 }
 
@@ -231,11 +231,11 @@ func TestSSTableBloomFilterFalsePositives(t *testing.T) {
 	mt.Set([]byte("apple"), []byte("1"))
 	mt.Set([]byte("banana"), []byte("2"))
 
-	writer, _ := NewSSTableWriter(path, 2)
-	writer.WriteFromMemTable(mt)
+	writer, _ := newSSTableWriter(path, 2)
+	writer.writeFromMemTable(mt)
 
-	reader, _ := OpenSSTable(path)
-	defer reader.Close()
+	reader, _ := openSSTable(path)
+	defer reader.close()
 
 	assert.True(
 		t,
@@ -248,7 +248,7 @@ func TestSSTableBloomFilterFalsePositives(t *testing.T) {
 		"Bloom filter should NOT have dragonfruit",
 	)
 
-	_, found, _ := reader.Get([]byte("dragonfruit"))
+	_, found, _ := reader.get([]byte("dragonfruit"))
 	assert.False(t, found)
 }
 
@@ -267,12 +267,12 @@ func TestSSTableSparseIndexBoundaries(t *testing.T) {
 		mt.Set(key, val)
 	}
 
-	writer, _ := NewSSTableWriter(path, totalEntries)
+	writer, _ := newSSTableWriter(path, totalEntries)
 	writer.indexInterval = interval
-	writer.WriteFromMemTable(mt)
+	writer.writeFromMemTable(mt)
 
-	reader, _ := OpenSSTable(path)
-	defer reader.Close()
+	reader, _ := openSSTable(path)
+	defer reader.close()
 
 	assert.Equal(t, 3, len(reader.sparseIndex))
 
@@ -290,7 +290,7 @@ func TestSSTableSparseIndexBoundaries(t *testing.T) {
 
 	for _, tc := range testCases {
 		key := []byte(fmt.Sprintf("k%04d", tc.idx))
-		val, found, err := reader.Get(key)
+		val, found, err := reader.get(key)
 		require.NoError(t, err)
 		assert.True(t, found, tc.msg)
 		assert.Equal(t, []byte(fmt.Sprintf("v%04d", tc.idx)), val, tc.msg)
