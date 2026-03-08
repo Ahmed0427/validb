@@ -61,7 +61,7 @@ var (
 )
 
 type IndexEntry struct {
-	Key    string
+	Key    []byte
 	Offset int64
 }
 
@@ -70,6 +70,8 @@ type SSTableWriter struct {
 	sparseIndex   []IndexEntry
 	bloomFilter   *bloom.BloomFilter
 	indexInterval int
+	writtenCount  int
+	currentOffset int
 }
 
 func NewSSTableWriter(path string, expectedEntries int) (*SSTableWriter, error) {
@@ -86,49 +88,39 @@ func NewSSTableWriter(path string, expectedEntries int) (*SSTableWriter, error) 
 }
 
 func (w *SSTableWriter) WriteFromMemTable(mt *MemTable) error {
-	var count int
 	var writeErr error
-	var currentOffset int64
-
 	mt.ForEach(func(key, value []byte) bool {
-		w.bloomFilter.Add(key)
-
-		if count%w.indexInterval == 0 {
-			w.sparseIndex = append(w.sparseIndex, IndexEntry{
-				Offset: currentOffset,
-				Key:    string(key),
-			})
-		}
-
-		n, err := w.writeEntry(key, value)
-		if err != nil {
-			writeErr = err
-			return false
-		}
-		count++
-		currentOffset += int64(n)
-		return true
+		writeErr = w.WriteRecord(key, value)
+		return writeErr == nil
 	})
 
 	if writeErr != nil {
 		return writeErr
 	}
 
-	bloomOffset := currentOffset
+	if err := w.writeMetadata(); err != nil {
+		return err
+	}
+
+	return w.file.Close()
+}
+
+func (w *SSTableWriter) writeMetadata() error {
+	bloomOffset := w.currentOffset
 	n, err := w.bloomFilter.WriteTo(w.file)
 	if err != nil {
 		return err
 	}
-	currentOffset += n
+	w.currentOffset += int(n)
 
-	indexOffset := currentOffset
+	indexOffset := w.currentOffset
 	idxBuf := new(bytes.Buffer)
 	tmp := make([]byte, 12)
 
 	for _, entry := range w.sparseIndex {
 		binary.BigEndian.PutUint32(tmp[:4], uint32(len(entry.Key)))
 		idxBuf.Write(tmp[:4])
-		idxBuf.WriteString(entry.Key)
+		idxBuf.Write(entry.Key)
 		binary.BigEndian.PutUint64(tmp[:8], uint64(entry.Offset))
 		idxBuf.Write(tmp[:8])
 	}
@@ -136,7 +128,7 @@ func (w *SSTableWriter) WriteFromMemTable(mt *MemTable) error {
 	if err != nil {
 		return err
 	}
-	currentOffset += int64(idxN)
+	w.currentOffset += int(idxN)
 
 	footer := make([]byte, FooterSize)
 	binary.BigEndian.PutUint64(footer[0:8], uint64(bloomOffset))
@@ -146,11 +138,10 @@ func (w *SSTableWriter) WriteFromMemTable(mt *MemTable) error {
 	if _, err := w.file.Write(footer); err != nil {
 		return err
 	}
-
-	return w.file.Close()
+	return nil
 }
 
-func (w *SSTableWriter) writeEntry(key, value []byte) (int, error) {
+func (w *SSTableWriter) writeKV(key, value []byte) (int, error) {
 	header := make([]byte, 8)
 	binary.BigEndian.PutUint32(header[:4], uint32(len(key)))
 
@@ -167,6 +158,25 @@ func (w *SSTableWriter) writeEntry(key, value []byte) (int, error) {
 	}
 
 	return w.file.Write(buf)
+}
+
+func (w *SSTableWriter) WriteRecord(key, value []byte) error {
+	w.bloomFilter.Add(key)
+
+	if w.writtenCount%w.indexInterval == 0 {
+		w.sparseIndex = append(w.sparseIndex, IndexEntry{
+			Offset: int64(w.currentOffset),
+			Key:    key,
+		})
+	}
+
+	n, err := w.writeKV(key, value)
+	if err != nil {
+		return err
+	}
+	w.writtenCount++
+	w.currentOffset += int(n)
+	return nil
 }
 
 type SSTableReader struct {
@@ -233,7 +243,7 @@ func deserializeIndex(data []byte) []IndexEntry {
 		kLen := int(binary.BigEndian.Uint32(data[cursor : cursor+4]))
 		cursor += 4
 
-		key := string(data[cursor : cursor+kLen])
+		key := data[cursor : cursor+kLen]
 		cursor += kLen
 
 		offset := int64(binary.BigEndian.Uint64(data[cursor : cursor+8]))
@@ -253,14 +263,14 @@ func (r *SSTableReader) Get(key []byte) ([]byte, bool, error) {
 	}
 
 	idx := sort.Search(len(r.sparseIndex), func(i int) bool {
-		return r.sparseIndex[i].Key >= string(key)
+		return bytes.Compare(r.sparseIndex[i].Key, key) >= 0
 	})
 
 	startOffset := int64(0)
 	if idx > 0 {
 		// If sort.Search finds an exact match at idx, we start there.
 		// If it finds a key larger than our target, we must start from the previous block.
-		if idx < len(r.sparseIndex) && r.sparseIndex[idx].Key == string(key) {
+		if idx < len(r.sparseIndex) && bytes.Compare(r.sparseIndex[idx].Key, key) == 0 {
 			startOffset = r.sparseIndex[idx].Offset
 		} else {
 			startOffset = r.sparseIndex[idx-1].Offset
