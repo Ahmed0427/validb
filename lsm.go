@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -74,7 +75,7 @@ func (lm *levelManager) remove(level int, name string) {
 
 func (lm *levelManager) needsCompaction(level int) bool {
 	return level < len(lm.maxFilesPerLevel) &&
-		len(lm.levels[level]) > lm.maxFilesPerLevel[level]
+		len(lm.levels[level]) >= lm.maxFilesPerLevel[level]
 }
 
 func (lm *levelManager) allFiles() []string {
@@ -89,13 +90,15 @@ func (lm *levelManager) allFiles() []string {
 }
 
 type LSMTree struct {
+	mu       sync.Mutex
 	basePath string
 	memTable *MemTable
 	levelMan *levelManager
 	wal      *WAL
 }
 
-func NewLSMTree(basePath string, thresholdBytes int, maxFilesPerLevel []int) (*LSMTree, error) {
+func NewLSMTree(basePath string, thresholdBytes int,
+	maxFilesPerLevel []int) (*LSMTree, error) {
 	if err := ensureDir(basePath); err != nil {
 		return nil, err
 	}
@@ -124,6 +127,8 @@ func NewLSMTree(basePath string, thresholdBytes int, maxFilesPerLevel []int) (*L
 }
 
 func (l *LSMTree) Set(key, value []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if value == nil {
 		return ErrValueIsNil
 	}
@@ -138,6 +143,8 @@ func (l *LSMTree) Set(key, value []byte) error {
 }
 
 func (l *LSMTree) Delete(key []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if err := l.wal.Append(OpDelete, key, nil); err != nil {
 		return fmt.Errorf("WAL append failed: %w", err)
 	}
@@ -146,13 +153,20 @@ func (l *LSMTree) Delete(key []byte) error {
 }
 
 func (l *LSMTree) Get(key []byte) ([]byte, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if val, ok := l.memTable.Get(key); ok {
-		return val, val != nil
+		if val == nil { // tombstone
+			return nil, false
+		}
+		return val, true
 	}
 	return l.searchSSTables(key)
 }
 
 func (l *LSMTree) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.memTable.Size() > 0 {
 		if err := l.flush(); err != nil {
 			return err
@@ -198,14 +212,20 @@ func (l *LSMTree) compact(level int) error {
 
 	readers := make([]*SSTableReader, 0, len(files))
 	iterators := make([]*SSTableIterator, 0, len(files))
+	expectedEntries := 0
+
 	for _, name := range files {
-		r, err := openSSTable(filepath.Join(l.basePath, name))
+		fullPath := filepath.Join(l.basePath, name)
+
+		r, err := openSSTable(fullPath)
 		if err != nil {
 			continue
 		}
 		readers = append(readers, r)
 		iterators = append(iterators, r.newIterator())
+		expectedEntries += 256
 	}
+
 	defer func() {
 		for _, r := range readers {
 			r.close()
@@ -222,12 +242,15 @@ func (l *LSMTree) compact(level int) error {
 
 	newName := fmt.Sprintf("L%d_%d.sst", level+1, time.Now().UnixNano())
 	newPath := filepath.Join(l.basePath, newName)
-	w, err := newSSTableWriter(newPath, 0)
+
+	w, err := newSSTableWriter(newPath, expectedEntries)
 	if err != nil {
 		return err
 	}
 
 	var lastKey []byte
+	var entriesProcessed int
+
 	for h.Len() > 0 {
 		item := heap.Pop(h).(mergeItem)
 		if it := iterators[item.readerIdx]; it.next() {
@@ -235,15 +258,18 @@ func (l *LSMTree) compact(level int) error {
 				key: it.ent.key, value: it.ent.value, readerIdx: item.readerIdx,
 			})
 		}
+
 		if lastKey != nil && bytes.Equal(lastKey, item.key) {
 			continue
 		}
+
 		if err := w.writeEntry(item.key, item.value); err != nil {
 			w.close()
 			os.Remove(newPath)
 			return err
 		}
 		lastKey = item.key
+		entriesProcessed++
 	}
 
 	if err := w.writeMetadata(); err != nil {
@@ -255,9 +281,13 @@ func (l *LSMTree) compact(level int) error {
 
 	for _, name := range files {
 		l.levelMan.remove(level, name)
-		os.Remove(filepath.Join(l.basePath, name))
+		oldPath := filepath.Join(l.basePath, name)
+		if err := os.Remove(oldPath); err != nil {
+		}
 	}
+
 	l.levelMan.add(level+1, newName)
+
 	return nil
 }
 
@@ -270,7 +300,10 @@ func (l *LSMTree) searchSSTables(key []byte) ([]byte, bool) {
 		val, found, err := r.get(key)
 		r.close()
 		if err == nil && found {
-			return val, val != nil
+			if val == nil { // tombstone
+				return nil, false
+			}
+			return val, true
 		}
 	}
 	return nil, false
