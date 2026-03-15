@@ -7,8 +7,8 @@ import (
 )
 
 type Entry struct {
-	Key   []byte
-	Value []byte
+	key   []byte
+	value []byte
 }
 
 type MemTable struct {
@@ -62,8 +62,8 @@ func (m *MemTable) AllEntries() []Entry {
 	entries := make([]Entry, 0, m.list.Len())
 	for elem := m.list.Front(); elem != nil; elem = elem.Next() {
 		entries = append(entries, Entry{
-			Key:   elem.Key().([]byte),
-			Value: elem.Value.([]byte),
+			key:   elem.Key().([]byte),
+			value: elem.Value.([]byte),
 		})
 	}
 	return entries

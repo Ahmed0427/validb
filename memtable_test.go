@@ -70,9 +70,9 @@ func TestMemTableOrdering(t *testing.T) {
 	entries := mt.AllEntries()
 	require.Equal(t, mt.Size(), len(entries))
 
-	assert.Equal(t, []byte("a"), entries[0].Key)
-	assert.Equal(t, []byte("b"), entries[1].Key)
-	assert.Equal(t, []byte("c"), entries[2].Key)
+	assert.Equal(t, []byte("a"), entries[0].key)
+	assert.Equal(t, []byte("b"), entries[1].key)
+	assert.Equal(t, []byte("c"), entries[2].key)
 }
 
 func TestMemTableIsFull(t *testing.T) {
