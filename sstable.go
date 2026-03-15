@@ -52,6 +52,7 @@ const (
 	// footer: [BloomOffset(8)][IndexOffset(8)][MagicNumber(4)] = 20 bytes
 	FooterSize           = 20
 	MagicNumber          = 0xDEADBEEF
+	TombstoneMark        = 0xFFFFFFFF
 	DefaultIndexInterval = 128
 )
 
@@ -288,60 +289,60 @@ func (r *SSTableReader) get(key []byte) ([]byte, bool, error) {
 }
 
 func (r *SSTableReader) scanData(offset int, targetKey []byte) ([]byte, bool, error) {
+	headerBuf := make([]byte, 8)
+
 	for offset < r.dataEnd {
-		header := make([]byte, 8)
-		if _, err := r.file.ReadAt(header, int64(offset)); err != nil {
+		if _, err := r.file.ReadAt(headerBuf, int64(offset)); err != nil {
 			if err == io.EOF {
 				break
 			}
 			return nil, false, err
 		}
 
-		kLen := binary.BigEndian.Uint32(header[:4])
-		vLen := binary.BigEndian.Uint32(header[4:])
-		offset += 8
+		keyLen := binary.BigEndian.Uint32(headerBuf[:4])
+		valLen := binary.BigEndian.Uint32(headerBuf[4:])
 
-		// Read Key
-		keyBuf := make([]byte, kLen)
-		if _, err := r.file.ReadAt(keyBuf, int64(offset)); err != nil {
+		isTombstone := (valLen == TombstoneMark)
+
+		keyOffset := int64(offset + 8)
+		keyBuf := make([]byte, keyLen)
+		if _, err := r.file.ReadAt(keyBuf, keyOffset); err != nil {
 			return nil, false, err
 		}
 
-		res := bytes.Compare(keyBuf, targetKey)
-		if res == 0 {
-			// check for tombstone marker
-			if vLen == 0xFFFFFFFF {
-				// found, but it's a tombstone
+		comparison := bytes.Compare(keyBuf, targetKey)
+
+		if comparison == 0 {
+			if isTombstone {
 				return nil, true, nil
 			}
 
-			// found it - read value
-			valBuf := make([]byte, vLen)
-			if _, err := r.file.ReadAt(valBuf, int64(offset+int(kLen))); err != nil {
+			valBuf := make([]byte, valLen)
+			valOffset := keyOffset + int64(keyLen)
+			if _, err := r.file.ReadAt(valBuf, valOffset); err != nil {
 				return nil, false, err
 			}
 			return valBuf, true, nil
 		}
 
-		if res > 0 {
-			// since SSTable is sorted, if current key > target, it's not here
+		if comparison > 0 {
 			break
 		}
 
-		offset += int(kLen + vLen)
+		actualValLen := valLen
+		if isTombstone {
+			actualValLen = 0
+		}
+		offset += 8 + int(keyLen+actualValLen)
 	}
-	return nil, false, nil
-}
 
-type SSTableEntry struct {
-	key   []byte
-	value []byte
+	return nil, false, nil
 }
 
 type SSTableIterator struct {
 	reader *SSTableReader
 	offset int
-	ent    *SSTableEntry
+	ent    *Entry
 	err    error
 }
 
@@ -368,7 +369,7 @@ func (it *SSTableIterator) next() bool {
 	kLen := binary.BigEndian.Uint32(header[:4])
 	vLen := binary.BigEndian.Uint32(header[4:])
 
-	entry := &SSTableEntry{}
+	entry := &Entry{}
 
 	entry.key = make([]byte, kLen)
 	if _, err := it.reader.file.ReadAt(entry.key, int64(it.offset+8)); err != nil {

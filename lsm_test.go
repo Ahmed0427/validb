@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -121,21 +122,21 @@ func TestLSMCompactionTrigger(t *testing.T) {
 
 	require.NoError(t, lsm.Close())
 
-	// // Reopen and verify everything survived.
-	// lsm2, err := NewLSMTree(tmp, 1, []int{2, 2})
-	// require.NoError(t, err)
-	// defer lsm2.Close()
-	//
-	// for i := 0; i < 20; i++ {
-	// 	got, ok := lsm2.Get(keys[i])
-	// 	if i < 10 {
-	// 		assert.False(t, ok, "key %s should still be deleted after reopen", keys[i])
-	// 		assert.Nil(t, string(got))
-	// 	} else {
-	// 		assert.True(t, ok, "key %s should survive reopen", keys[i])
-	// 		assert.Equal(t, string(v), string(got))
-	// 	}
-	// }
+	// Reopen and verify everything survived.
+	lsm2, err := NewLSMTree(tmp, 1, []int{2, 2})
+	require.NoError(t, err)
+	defer lsm2.Close()
+
+	for i := 0; i < 20; i++ {
+		got, ok := lsm2.Get(keys[i])
+		if i < 10 {
+			assert.False(t, ok, "key %s should still be deleted after reopen", keys[i])
+			assert.Nil(t, got)
+		} else {
+			assert.True(t, ok, "key %s should survive reopen", keys[i])
+			assert.Equal(t, string(v), string(got))
+		}
+	}
 }
 
 func listSSTFiles(t *testing.T, dir string) []string {
@@ -148,5 +149,6 @@ func listSSTFiles(t *testing.T, dir string) []string {
 			out = append(out, e.Name())
 		}
 	}
+	sort.Strings(out)
 	return out
 }
