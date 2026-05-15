@@ -156,6 +156,7 @@ func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
 }
 
 func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
+	w.file.Seek(0, 0)
 	next := func() (uint8, []byte, []byte, error) {
 		header := make([]byte, headerSize)
 		_, err := io.ReadFull(w.file, header)
