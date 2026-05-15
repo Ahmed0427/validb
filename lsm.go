@@ -212,7 +212,7 @@ func (l *LSMTree) compact(level int) error {
 
 	readers := make([]*SSTableReader, 0, len(files))
 	iterators := make([]*SSTableIterator, 0, len(files))
-	expectedEntries := 0
+	expectedEntryCount := 0
 
 	for _, name := range files {
 		fullPath := filepath.Join(l.basePath, name)
@@ -223,7 +223,7 @@ func (l *LSMTree) compact(level int) error {
 		}
 		readers = append(readers, r)
 		iterators = append(iterators, r.newIterator())
-		expectedEntries += 256
+		expectedEntryCount += len(r.sparseIndex) * DefaultIndexInterval
 	}
 
 	defer func() {
@@ -243,7 +243,7 @@ func (l *LSMTree) compact(level int) error {
 	newName := fmt.Sprintf("L%d_%d.sst", level+1, time.Now().UnixNano())
 	newPath := filepath.Join(l.basePath, newName)
 
-	w, err := newSSTableWriter(newPath, expectedEntries)
+	w, err := newSSTableWriter(newPath, expectedEntryCount)
 	if err != nil {
 		return err
 	}
