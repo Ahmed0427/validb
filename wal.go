@@ -50,6 +50,7 @@ type WAL struct {
 	writer *bufio.Writer
 	queue  chan appendRequest
 	stop   chan struct{}
+	done   chan struct{}
 }
 
 func NewWAL(path string) (*WAL, error) {
@@ -64,6 +65,7 @@ func NewWAL(path string) (*WAL, error) {
 		writer: bufio.NewWriterSize(file, DefaultWriteBufferSize),
 		queue:  make(chan appendRequest, DefaultMaxQueueSize),
 		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
 	}
 
 	go w.runFlusher()
@@ -77,6 +79,7 @@ func (w *WAL) Append(opType uint8, key, val []byte) error {
 }
 
 func (w *WAL) runFlusher() {
+	defer close(w.done)
 	var batch []chan error
 
 	for {
@@ -91,6 +94,9 @@ func (w *WAL) runFlusher() {
 			w.flushBatch(&batch)
 
 		case <-w.stop:
+			for len(w.queue) > 0 {
+				w.addToBatch(<-w.queue, &batch)
+			}
 			w.flushBatch(&batch)
 			return
 		}
@@ -200,5 +206,6 @@ func (w *WAL) Clear() error {
 
 func (w *WAL) Close() error {
 	close(w.stop)
+	<-w.done
 	return w.file.Close()
 }
