@@ -107,6 +107,7 @@ func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
 
 func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
 	w.file.Seek(0, 0)
+	info, statErr := w.file.Stat()
 	next := func() (uint8, []byte, []byte, error) {
 		header := make([]byte, headerSize)
 		_, err := io.ReadFull(w.file, header)
@@ -122,6 +123,10 @@ func (w *WAL) NewIterator() func() (uint8, []byte, []byte, error) {
 		valLen := binary.BigEndian.Uint32(header[valLenOffset:])
 		opType := header[typeOffset]
 
+		// a garbage length must not make us allocate gigabytes
+		if statErr != nil || int64(keyLen)+int64(valLen) > info.Size() {
+			return 0, nil, nil, ErrCorruptedWAL
+		}
 		payload := make([]byte, keyLen+valLen)
 		if _, err := io.ReadFull(w.file, payload); err != nil {
 			return 0, nil, nil, err

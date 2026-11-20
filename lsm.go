@@ -356,10 +356,18 @@ func ensureDir(path string) error {
 
 func recoverFromWAL(wal *WAL, memTable *MemTable) error {
 	next := wal.NewIterator()
+	var good int64 // file offset right after the last complete record
 	for {
 		op, key, val, err := next()
 		if err == io.EOF {
 			break
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, ErrCorruptedWAL) {
+			// a crash in the middle of a write: drop the broken tail
+			if err := wal.file.Truncate(good); err != nil {
+				return fmt.Errorf("WAL truncate failed: %w", err)
+			}
+			return wal.file.Sync()
 		}
 		if err != nil {
 			return fmt.Errorf("WAL recovery failed: %w", err)
@@ -378,6 +386,9 @@ func recoverFromWAL(wal *WAL, memTable *MemTable) error {
 			for _, o := range ops {
 				memTable.Set(o.key, o.value)
 			}
+		}
+		if good, err = wal.file.Seek(0, io.SeekCurrent); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -170,10 +170,8 @@ func TestDeletesFlushMemtable(t *testing.T) {
 	assert.False(t, db.memTable.IsFull(), "memtable grew past its limit")
 }
 
-// NewLSMTree appends a hidden "unlimited" last level. It must not write
-// into the caller's slice, which the caller may still use.
 func TestLevelConfigNotShared(t *testing.T) {
-	levels := make([]int, 2, 3) // spare capacity: append would reuse it
+	levels := make([]int, 2, 3)
 	levels[0], levels[1] = 4, 4
 	db, err := NewLSMTree(t.TempDir(), 1<<20, levels)
 	require.NoError(t, err)
@@ -181,6 +179,36 @@ func TestLevelConfigNotShared(t *testing.T) {
 
 	levels = append(levels, 1) // caller reuses its slice
 	assert.Equal(t, math.MaxInt, db.levelMan.maxFilesPerLevel[2])
+}
+
+// A crash in the middle of a WAL write leaves a half record at the end.
+// Reopen must keep every complete record, cut off the half one, and
+// keep working (new writes must not land after the garbage).
+func TestTornWALTailIsTruncated(t *testing.T) {
+	dir := t.TempDir()
+	db, err := NewLSMTree(dir, 1<<20, []int{4})
+	require.NoError(t, err)
+	require.NoError(t, db.Set([]byte("a"), []byte("1")))
+	require.NoError(t, db.wal.Close()) // crash: skip db.Close()
+
+	f, err := os.OpenFile(filepath.Join(dir, "wal"), os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.Write([]byte{1, 2, 3, 4, 0, 0, 0}) // 7 of the 21 header bytes
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	db, err = NewLSMTree(dir, 1<<20, []int{4})
+	require.NoError(t, err, "a torn tail must not stop the DB from opening")
+	require.NoError(t, db.Set([]byte("b"), []byte("2")))
+	require.NoError(t, db.wal.Close()) // crash again
+
+	db, err = NewLSMTree(dir, 1<<20, []int{4})
+	require.NoError(t, err)
+	defer db.Close()
+	for _, k := range []string{"a", "b"} {
+		_, ok := db.Get([]byte(k))
+		assert.True(t, ok, k)
+	}
 }
 
 func listSSTFiles(t *testing.T, dir string) []string {
