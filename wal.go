@@ -19,7 +19,6 @@ const (
 	DefaultWriteBufferSize = 64 * 1024
 	DefaultMaxQueueSize    = 1024
 	DefaultMaxBatchSize    = 1000 // Stay < MaxQueueSize to avoid blocking
-	DefaultFlushInterval   = 10 * time.Millisecond
 	DefaultFilePerm        = 0644
 )
 
@@ -78,32 +77,32 @@ func (w *WAL) Append(opType uint8, key, val []byte) error {
 }
 
 func (w *WAL) runFlusher() {
-	ticker := time.NewTicker(DefaultFlushInterval)
-	defer ticker.Stop()
-
 	var batch []chan error
 
 	for {
 		select {
 		case req := <-w.queue:
-			err := w.writeToBuffer(req.opType, req.key, req.val)
-			if err != nil {
-				req.errChan <- err
-				continue
+			w.addToBatch(req, &batch)
+			// group commit: also take every request that is already
+			// waiting in the queue, then do ONE flush for all of them
+			for len(batch) < DefaultMaxBatchSize && len(w.queue) > 0 {
+				w.addToBatch(<-w.queue, &batch)
 			}
-			batch = append(batch, req.errChan)
-
-			if len(batch) >= DefaultMaxBatchSize {
-				w.flushBatch(&batch)
-			}
-
-		case <-ticker.C:
 			w.flushBatch(&batch)
+
 		case <-w.stop:
 			w.flushBatch(&batch)
 			return
 		}
 	}
+}
+
+func (w *WAL) addToBatch(req appendRequest, batch *[]chan error) {
+	if err := w.writeToBuffer(req.opType, req.key, req.val); err != nil {
+		req.errChan <- err
+		return
+	}
+	*batch = append(*batch, req.errChan)
 }
 
 func (w *WAL) flushBatch(batch *[]chan error) {
