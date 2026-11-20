@@ -13,6 +13,7 @@ import (
 const (
 	OpSet uint8 = iota
 	OpDelete
+	OpBatch
 )
 
 const (
@@ -126,10 +127,10 @@ func (w *WAL) flushBatch(batch *[]chan error) {
 }
 
 func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
-	if opType != OpSet && opType != OpDelete {
+	if opType != OpSet && opType != OpDelete && opType != OpBatch {
 		return ErrInvalidOpType
 	}
-	if len(key) == 0 {
+	if len(key) == 0 && opType != OpBatch {
 		return ErrKeyIsEmpty
 	}
 

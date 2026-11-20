@@ -32,10 +32,20 @@ func TestRandomOpsMatchModel(t *testing.T) {
 	for round := 0; round < rounds; round++ {
 		for i := 0; i < opsPerRound; i++ {
 			key := fmt.Sprintf("key-%03d", rng.Intn(keySpace))
-			if rng.Intn(4) == 0 { // 25% deletes
+			switch rng.Intn(8) {
+			case 0, 1: // 25% deletes
 				require.NoError(t, db.Delete([]byte(key)))
 				delete(model, key)
-			} else {
+			case 2: // 12.5% batches: set one key, delete another
+				key2 := fmt.Sprintf("key-%03d", rng.Intn(keySpace))
+				val := fmt.Sprintf("batch-%d-%d", round, i)
+				var b Batch
+				b.Set([]byte(key), []byte(val))
+				b.Delete([]byte(key2))
+				require.NoError(t, db.Write(&b))
+				model[key] = val
+				delete(model, key2) // applied in order: if key2 == key, it ends deleted
+			default:
 				val := fmt.Sprintf("val-%d-%d", round, i)
 				require.NoError(t, db.Set([]byte(key), []byte(val)))
 				model[key] = val

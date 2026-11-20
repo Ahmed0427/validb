@@ -152,6 +152,33 @@ func (l *LSMTree) Delete(key []byte) error {
 	return nil
 }
 
+func (l *LSMTree) Write(b *Batch) error {
+	if len(b.ops) == 0 {
+		return nil
+	}
+	for _, o := range b.ops {
+		if len(o.key) == 0 {
+			return ErrKeyIsEmpty
+		}
+		if o.op == OpSet && o.value == nil {
+			return ErrValueIsNil
+		}
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.wal.Append(OpBatch, nil, b.encode()); err != nil {
+		return fmt.Errorf("WAL append failed: %w", err)
+	}
+	for _, o := range b.ops {
+		l.memTable.Set(o.key, o.value)
+	}
+	if l.memTable.IsFull() {
+		return l.flush()
+	}
+	return nil
+}
+
 func (l *LSMTree) Get(key []byte) ([]byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -333,10 +360,20 @@ func recoverFromWAL(wal *WAL, memTable *MemTable) error {
 		if err != nil {
 			return fmt.Errorf("WAL recovery failed: %w", err)
 		}
-		if op == OpSet {
+
+		switch op {
+		case OpSet:
 			memTable.Set(key, val)
-		} else {
+		case OpDelete:
 			memTable.Set(key, nil)
+		case OpBatch:
+			ops, err := decodeBatch(val)
+			if err != nil {
+				return fmt.Errorf("WAL recovery failed: %w", err)
+			}
+			for _, o := range ops {
+				memTable.Set(o.key, o.value)
+			}
 		}
 	}
 	return nil

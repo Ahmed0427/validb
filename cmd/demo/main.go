@@ -16,6 +16,7 @@ func main() {
 	n := flag.Int("n", 200, "number of keys to write")
 	del := flag.Bool("del", false, "delete every key after writing it")
 	vsize := flag.Int("v", 100, "value size in bytes")
+	batch := flag.Int("batch", 1, "keys per write: 1 = Set, more = Batch")
 	flag.Parse()
 
 	db, err := validb.NewLSMTree(*dir, 64*1024, []int{4, 4})
@@ -27,11 +28,15 @@ func main() {
 	val := make([]byte, *vsize)
 	writes := 0
 	start := time.Now()
-	for i := 0; i < *n; i++ {
-		if err := db.Set([]byte(fmt.Sprintf("key-%08d", i)), val); err != nil {
+	for i := 0; i < *n; i += *batch {
+		var b validb.Batch
+		for j := i; j < i+*batch && j < *n; j++ {
+			b.Set([]byte(fmt.Sprintf("key-%08d", j)), val)
+		}
+		if err := db.Write(&b); err != nil {
 			log.Fatal(err)
 		}
-		writes++
+		writes += b.Len()
 	}
 	if *del {
 		for i := 0; i < *n; i++ {
