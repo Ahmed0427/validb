@@ -241,30 +241,41 @@ func (l *LSMTree) flush() error {
 }
 
 func (l *LSMTree) compact(level int) error {
-	files := make([]string, len(l.levelMan.levels[level]))
-	copy(files, l.levelMan.levels[level])
+	upper := slices.Clone(l.levelMan.levels[level])
+	files := upper
+
+	// If the next level is the last one, merge its files in too,
+	// so the last level always stays a single table.
+	// Its files are older, so they go first: when the same key
+	// appears twice, the later (newer) file wins.
+	lower := []string(nil)
+	last := level+1 == l.levelMan.numLevels-1
+	if last {
+		lower = slices.Clone(l.levelMan.levels[level+1])
+		files = append(slices.Clone(lower), upper...)
+	}
 
 	readers := make([]*SSTableReader, 0, len(files))
 	iterators := make([]*SSTableIterator, 0, len(files))
 	expectedEntryCount := 0
-
-	for _, name := range files {
-		fullPath := filepath.Join(l.basePath, name)
-
-		r, err := openSSTable(fullPath)
-		if err != nil {
-			continue
-		}
-		readers = append(readers, r)
-		iterators = append(iterators, r.newIterator())
-		expectedEntryCount += len(r.sparseIndex) * DefaultIndexInterval
-	}
 
 	defer func() {
 		for _, r := range readers {
 			r.close()
 		}
 	}()
+
+	for _, name := range files {
+		fullPath := filepath.Join(l.basePath, name)
+
+		r, err := openSSTable(fullPath)
+		if err != nil {
+			return fmt.Errorf("compaction: open %s: %w", name, err)
+		}
+		readers = append(readers, r)
+		iterators = append(iterators, r.newIterator())
+		expectedEntryCount += len(r.sparseIndex) * DefaultIndexInterval
+	}
 
 	h := &mergeHeap{}
 	heap.Init(h)
@@ -296,13 +307,23 @@ func (l *LSMTree) compact(level int) error {
 		if lastKey != nil && bytes.Equal(lastKey, item.key) {
 			continue
 		}
+		lastKey = item.key
+		if last && item.value == nil {
+			continue // a tombstone with nothing older to hide
+		}
 
 		if err := w.writeEntry(item.key, item.value); err != nil {
 			w.close()
 			return err
 		}
-		lastKey = item.key
 		entriesProcessed++
+	}
+
+	for _, it := range iterators {
+		if it.err != nil {
+			w.close()
+			return it.err
+		}
 	}
 
 	if err := w.writeMetadata(); err != nil {
@@ -314,15 +335,17 @@ func (l *LSMTree) compact(level int) error {
 		return err
 	}
 
-	for _, name := range files {
-		l.levelMan.remove(level, name)
-		oldPath := filepath.Join(l.basePath, name)
-		os.Remove(oldPath)
-	}
-
 	l.levelMan.add(level+1, newName)
-
-	return nil
+	for _, name := range upper {
+		l.levelMan.remove(level, name)
+	}
+	for _, name := range lower {
+		l.levelMan.remove(level+1, name)
+	}
+	for _, name := range files {
+		os.Remove(filepath.Join(l.basePath, name))
+	}
+	return syncDir(l.basePath)
 }
 
 func (l *LSMTree) searchSSTables(key []byte) ([]byte, bool) {

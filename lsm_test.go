@@ -229,6 +229,42 @@ func TestSSTableWritesAreAtomic(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(dir, "L0_2.sst.tmp"), "leftover .tmp not cleaned up")
 }
 
+// If an input table can't be read, compaction must fail and keep it,
+// not skip it and then delete it (losing its data).
+func TestCompactionKeepsUnreadableInput(t *testing.T) {
+	dir := t.TempDir()
+	db, err := NewLSMTree(dir, 1, []int{2}) // every write flushes
+	require.NoError(t, err)
+	defer db.Close()
+
+	require.NoError(t, db.Set([]byte("a"), []byte("1")))
+	bad := filepath.Join(dir, db.levelMan.levels[0][0])
+	require.NoError(t, os.Truncate(bad, 5)) // break the first table
+
+	assert.Error(t, db.Set([]byte("b"), []byte("2")), "this flush triggers the compaction")
+	assert.FileExists(t, bad, "compaction deleted a table it could not read")
+}
+
+// Compacting into the last level merges the whole level into one table.
+// Nothing older exists below it, so tombstones can be dropped there.
+func TestLastLevelDropsTombstones(t *testing.T) {
+	db, err := NewLSMTree(t.TempDir(), 1, []int{2}) // L0 max 2, L1 is last
+	require.NoError(t, err)
+	defer db.Close()
+
+	for i := 0; i < 20; i++ {
+		require.NoError(t, db.Set([]byte("k"), []byte("v")))
+		require.NoError(t, db.Delete([]byte("k")))
+	}
+	last := db.levelMan.levels[1]
+	require.Len(t, last, 1, "last level should be a single merged table")
+
+	r, err := openSSTable(filepath.Join(db.basePath, last[0]))
+	require.NoError(t, err)
+	defer r.close()
+	assert.False(t, r.newIterator().next(), "tombstone kept in the last level")
+}
+
 func listSSTFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
