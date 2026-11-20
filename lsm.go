@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -32,7 +33,7 @@ func newLevelManager(basePath string, maxFilesPerLevel []int) (*levelManager, er
 		return nil, err
 	}
 
-	maxFilesPerLevel = append(maxFilesPerLevel, math.MaxInt)
+	maxFilesPerLevel = append(slices.Clone(maxFilesPerLevel), math.MaxInt)
 	numLevels := len(maxFilesPerLevel)
 	lm := &levelManager{
 		numLevels:        numLevels,

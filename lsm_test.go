@@ -2,6 +2,7 @@ package validb
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -167,6 +168,19 @@ func TestDeletesFlushMemtable(t *testing.T) {
 		require.NoError(t, db.Delete([]byte(fmt.Sprintf("key-%03d", i))))
 	}
 	assert.False(t, db.memTable.IsFull(), "memtable grew past its limit")
+}
+
+// NewLSMTree appends a hidden "unlimited" last level. It must not write
+// into the caller's slice, which the caller may still use.
+func TestLevelConfigNotShared(t *testing.T) {
+	levels := make([]int, 2, 3) // spare capacity: append would reuse it
+	levels[0], levels[1] = 4, 4
+	db, err := NewLSMTree(t.TempDir(), 1<<20, levels)
+	require.NoError(t, err)
+	defer db.Close()
+
+	levels = append(levels, 1) // caller reuses its slice
+	assert.Equal(t, math.MaxInt, db.levelMan.maxFilesPerLevel[2])
 }
 
 func listSSTFiles(t *testing.T, dir string) []string {
