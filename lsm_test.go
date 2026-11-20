@@ -158,6 +158,17 @@ func TestSetCopiesCallerBuffers(t *testing.T) {
 	assert.Equal(t, "v2", string(got))
 }
 
+func TestDeletesFlushMemtable(t *testing.T) {
+	db, err := NewLSMTree(t.TempDir(), 64, []int{100})
+	require.NoError(t, err)
+	defer db.Close()
+
+	for i := 0; i < 100; i++ {
+		require.NoError(t, db.Delete([]byte(fmt.Sprintf("key-%03d", i))))
+	}
+	assert.False(t, db.memTable.IsFull(), "memtable grew past its limit")
+}
+
 func listSSTFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)

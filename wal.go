@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -18,8 +19,6 @@ const (
 
 const (
 	DefaultWriteBufferSize = 64 * 1024
-	DefaultMaxQueueSize    = 1024
-	DefaultMaxBatchSize    = 1000 // Stay < MaxQueueSize to avoid blocking
 	DefaultFilePerm        = 0644
 )
 
@@ -38,20 +37,11 @@ const (
 	headerSize      = 21
 )
 
-type appendRequest struct {
-	opType  uint8
-	key     []byte
-	val     []byte
-	errChan chan error // channel to send the result back to the caller
-}
-
 type WAL struct {
 	Path   string
 	file   *os.File
 	writer *bufio.Writer
-	queue  chan appendRequest
-	stop   chan struct{}
-	done   chan struct{}
+	mu     sync.Mutex
 }
 
 func NewWAL(path string) (*WAL, error) {
@@ -60,70 +50,24 @@ func NewWAL(path string) (*WAL, error) {
 		return nil, err
 	}
 
-	w := &WAL{
+	return &WAL{
 		Path:   path,
 		file:   file,
 		writer: bufio.NewWriterSize(file, DefaultWriteBufferSize),
-		queue:  make(chan appendRequest, DefaultMaxQueueSize),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
-	}
-
-	go w.runFlusher()
-	return w, nil
+	}, nil
 }
 
+// Append writes one record and fsyncs it before returning.
 func (w *WAL) Append(opType uint8, key, val []byte) error {
-	errChan := make(chan error, 1)
-	w.queue <- appendRequest{opType, key, val, errChan}
-	return <-errChan
-}
-
-func (w *WAL) runFlusher() {
-	defer close(w.done)
-	var batch []chan error
-
-	for {
-		select {
-		case req := <-w.queue:
-			w.addToBatch(req, &batch)
-			// group commit: also take every request that is already
-			// waiting in the queue, then do ONE flush for all of them
-			for len(batch) < DefaultMaxBatchSize && len(w.queue) > 0 {
-				w.addToBatch(<-w.queue, &batch)
-			}
-			w.flushBatch(&batch)
-
-		case <-w.stop:
-			for len(w.queue) > 0 {
-				w.addToBatch(<-w.queue, &batch)
-			}
-			w.flushBatch(&batch)
-			return
-		}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.writeToBuffer(opType, key, val); err != nil {
+		return err
 	}
-}
-
-func (w *WAL) addToBatch(req appendRequest, batch *[]chan error) {
-	if err := w.writeToBuffer(req.opType, req.key, req.val); err != nil {
-		req.errChan <- err
-		return
+	if err := w.writer.Flush(); err != nil {
+		return err
 	}
-	*batch = append(*batch, req.errChan)
-}
-
-func (w *WAL) flushBatch(batch *[]chan error) {
-	if len(*batch) == 0 {
-		return
-	}
-	err := w.writer.Flush()
-	if err == nil {
-		err = w.file.Sync()
-	}
-	for _, ch := range *batch {
-		ch <- err
-	}
-	*batch = (*batch)[:0]
+	return w.file.Sync()
 }
 
 func (w *WAL) writeToBuffer(opType uint8, key, val []byte) error {
@@ -206,7 +150,5 @@ func (w *WAL) Clear() error {
 }
 
 func (w *WAL) Close() error {
-	close(w.stop)
-	<-w.done
 	return w.file.Close()
 }
