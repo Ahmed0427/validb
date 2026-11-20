@@ -149,6 +149,9 @@ func (l *LSMTree) Delete(key []byte) error {
 		return fmt.Errorf("WAL append failed: %w", err)
 	}
 	l.memTable.Set(bytes.Clone(key), nil)
+	if l.memTable.IsFull() {
+		return l.flush()
+	}
 	return nil
 }
 
