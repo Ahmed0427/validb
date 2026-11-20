@@ -1,74 +1,117 @@
 # validb
 
-A persistent key-value store built on a Log-Structured Merge-tree (LSM-tree), written in Go. Built from scratch, including the WAL, MemTable, and SSTable layers.
+An embedded key-value store for Go, built on a log-structured merge-tree (LSM-tree). The
+WAL, memtable, SSTables and compaction are all written from scratch.
 
 ## Features
 
-- **Write-ahead log (WAL)** with CRC checksums and batched fsync
-- **MemTable** backed by a skip list, with tombstone support for deletes
-- **SSTables** with a bloom filter, sparse index, and support for tombstones
-- **K-way merge compaction** using a min-heap, with key deduplication across levels
-- **WAL recovery** on startup, unflushed memtable entries are replayed automatically
-- **Leveled compaction** files cascade from L0 → L1 → L2 as thresholds are exceeded
+- Every write is in the WAL and fsynced before `Set`, `Delete` or `Write` returns.
+- `Batch` groups many sets and deletes into one WAL record: atomic, with a single fsync.
+- Recovery replays the WAL on open and cuts off a torn tail left by a crash.
+- SSTables are written to a `.tmp` file, fsynced, then renamed, so a crash never leaves a
+  half-written table.
+- Each SSTable has a bloom filter and a sparse index.
+- Leveled compaction keeps the last level as one table and drops tombstones there.
+
+## Install
+
+```
+go get github.com/ahmed0427/validb
+```
 
 ## Usage
 
 ```go
-lsm, err := validb.NewLSMTree(
-    "/path/to/data",  // directory for SSTables and WAL
-    8 * 1024 * 1024,  // memtable flush threshold in bytes
-    []int{5, 5, 5},   // max SST files per level before compaction triggers
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/ahmed0427/validb"
 )
-if err != nil {
-    log.Fatal(err)
+
+func main() {
+	db, err := validb.NewLSMTree(
+		"data",      // directory for the WAL and the .sst files
+		4<<20,       // flush the memtable to disk once it holds 4 MiB
+		[]int{4, 4}, // max tables in L0 and L1; one more level holds the rest
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close() // flushes the memtable
+
+	if err := db.Set([]byte("user:1"), []byte("alice")); err != nil {
+		log.Fatal(err)
+	}
+	if val, ok := db.Get([]byte("user:1")); ok {
+		fmt.Println(string(val)) // alice
+	}
+	if err := db.Delete([]byte("user:1")); err != nil {
+		log.Fatal(err)
+	}
+
+	// Many writes, one fsync. Either all of them survive a crash or none does.
+	var b validb.Batch
+	b.Set([]byte("user:2"), []byte("bob"))
+	b.Set([]byte("user:3"), []byte("carol"))
+	b.Delete([]byte("user:4"))
+	if err := db.Write(&b); err != nil {
+		log.Fatal(err)
+	}
 }
-defer lsm.Close()
-
-// Write
-err = lsm.Set([]byte("hello"), []byte("world"))
-
-// Read
-val, ok := lsm.Get([]byte("hello"))
-
-// Delete (writes a tombstone)
-err = lsm.Delete([]byte("hello"))
-
 ```
 
-`Close` flushes any remaining memtable entries to disk before shutting down.
+Notes:
 
-## Architecture
+- Keys must be non-empty. Values must be non-nil, but an empty value is allowed.
+- `Set`, `Delete` and `Batch` copy their arguments, so the caller may reuse its buffers.
+- A single `Set` costs one fsync, about 1 ms on most disks. Use a `Batch` for bulk loads.
+- All methods are safe for concurrent use. Writes are serialized by one lock.
 
-```
-Write path:   WAL append → MemTable → (flush on full) → L0 SSTable → compaction → L1, L2, ...
-Read path:    Get → MemTable → L0 SSTables (newest first) → L1 → L2 → ...
+## Demo
 
-```
-
-### WAL
-
-Every write is appended to the WAL before touching the memtable. On startup, any entries not yet flushed to an SSTable are replayed to reconstruct the memtable. The WAL is cleared after each successful flush.
-
-### MemTable
-
-An in-memory skip list ordered by key. Setting a key to `nil` writes a tombstone, which shadows any older value in the SSTables below. The memtable is flushed to a new L0 SSTable when its size exceeds the configured threshold.
-
-### SSTable file layout
-
-Each `.sst` file contains, in order:
+`cmd/demo` writes and reads keys, then prints throughput, heap use and the files on disk:
 
 ```
-[data block]    key/value pairs, length-prefixed, tombstones included
-[index block]   sparse index of (key, offset) pairs for binary search
-[bloom filter]  probabilistic membership test to skip unnecessary reads
-[footer]        offsets to the index and bloom filter blocks
-
+go run ./cmd/demo -n 2000              # one Set per key
+go run ./cmd/demo -n 2000 -batch 100   # 100 keys per Batch
+go run ./cmd/demo -n 2000 -del         # also delete every key after writing it
 ```
 
-Files are named `L{level}_{timestamp}.sst` and sorted lexicographically within each level. Newer files within a level are searched first.
+## How it works
 
-### Compaction
+```
+write: WAL (fsync) -> memtable -> full? flush to L0 table -> L0 full? compact into L1 ...
+read:  memtable -> L0 (newest first) -> L1 -> ... -> last level
+```
 
-When a level exceeds its file limit, all files at that level are merged into a single SSTable at the next level. Merging uses a min-heap across all iterators (k-way merge), and duplicate keys are deduplicated, the entry from the newest file wins. Tombstones are preserved through compaction until they reach the deepest level.
+**WAL.** Each record is `[crc32][op][timestamp][keyLen][valLen][key][value]`. A batch is
+one record whose value holds all its operations. The WAL is truncated after every flush.
 
-Compaction is triggered inline on every flush and cascades upward if the target level also exceeds its limit after receiving the new file.
+**Memtable.** A skip list sorted by key. A delete stores a nil value (a tombstone) that
+hides older values in the tables below.
+
+**SSTable.** A file named `L{level}_{unixnano}.sst`, laid out as:
+
+```
+[data]    [keyLen 4][valLen 4][key][value] ... sorted; valLen 0xFFFFFFFF is a tombstone
+[bloom]   bloom filter, skips tables that cannot hold the key
+[index]   [keyLen 4][key][offset 8] for every 128th entry
+[footer]  [bloom offset 8][index offset 8][magic 4]
+```
+
+**Compaction.** When a level reaches its table limit, all its tables are merged with a
+k-way heap merge into one table on the next level. For a key that appears more than once,
+the newest version wins. Merges into the last level also take in that level's existing
+table, so it stays a single table with nothing older below it, and tombstones are dropped.
+
+## Testing
+
+```
+go test -race ./...
+```
+
+The tests include a randomized test that checks the store against a Go map across reopens,
+and crash tests for torn WAL tails, batches and unfinished SSTables.
