@@ -110,7 +110,7 @@ func (w *WAL) flushBatch(batch *[]chan error) {
 		return
 	}
 	err := w.writer.Flush()
-	if err != nil {
+	if err == nil {
 		err = w.file.Sync()
 	}
 	for _, ch := range *batch {
