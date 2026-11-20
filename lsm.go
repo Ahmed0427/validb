@@ -135,7 +135,7 @@ func (l *LSMTree) Set(key, value []byte) error {
 	if err := l.wal.Append(OpSet, key, value); err != nil {
 		return fmt.Errorf("WAL append failed: %w", err)
 	}
-	l.memTable.Set(key, value)
+	l.memTable.Set(bytes.Clone(key), bytes.Clone(value))
 	if l.memTable.IsFull() {
 		return l.flush()
 	}
@@ -148,7 +148,7 @@ func (l *LSMTree) Delete(key []byte) error {
 	if err := l.wal.Append(OpDelete, key, nil); err != nil {
 		return fmt.Errorf("WAL append failed: %w", err)
 	}
-	l.memTable.Set(key, nil)
+	l.memTable.Set(bytes.Clone(key), nil)
 	return nil
 }
 

@@ -139,6 +139,25 @@ func TestLSMCompactionTrigger(t *testing.T) {
 	}
 }
 
+func TestSetCopiesCallerBuffers(t *testing.T) {
+	db, err := NewLSMTree(t.TempDir(), 1<<20, []int{4})
+	require.NoError(t, err)
+	defer db.Close()
+
+	key, val := []byte("k1"), []byte("v1")
+	require.NoError(t, db.Set(key, val))
+	copy(key, "k2") // reuse the buffers for the next write
+	copy(val, "v2")
+	require.NoError(t, db.Set(key, val))
+
+	got, ok := db.Get([]byte("k1"))
+	assert.True(t, ok)
+	assert.Equal(t, "v1", string(got))
+	got, ok = db.Get([]byte("k2"))
+	assert.True(t, ok)
+	assert.Equal(t, "v2", string(got))
+}
+
 func listSSTFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
