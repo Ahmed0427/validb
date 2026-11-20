@@ -211,6 +211,24 @@ func TestTornWALTailIsTruncated(t *testing.T) {
 	}
 }
 
+// An SSTable must appear under its real name only once it is complete.
+// A crash mid-write leaves just a .tmp file, which the next open deletes.
+func TestSSTableWritesAreAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "L0_1.sst")
+	w, err := newSSTableWriter(path, 1)
+	require.NoError(t, err)
+	require.NoError(t, w.writeEntry([]byte("k"), []byte("v")))
+	assert.NoFileExists(t, path, "half-written table is visible")
+	w.close() // "crash" before finishing
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "L0_2.sst.tmp"), []byte("junk"), 0644))
+	db, err := NewLSMTree(dir, 1<<20, []int{4})
+	require.NoError(t, err)
+	defer db.Close()
+	assert.NoFileExists(t, filepath.Join(dir, "L0_2.sst.tmp"), "leftover .tmp not cleaned up")
+}
+
 func listSSTFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)

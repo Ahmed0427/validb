@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/bits-and-blooms/bloom"
@@ -70,18 +71,20 @@ type SSTableWriter struct {
 	file          *os.File
 	sparseIndex   []IndexEntry
 	bloomFilter   *bloom.BloomFilter
+	path          string
 	currentOffset int
 	indexInterval int
 	writtenCount  int
 }
 
 func newSSTableWriter(path string, expectedEntries int) (*SSTableWriter, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, err
 	}
 	return &SSTableWriter{
 		file:          f,
+		path:          path,
 		sparseIndex:   []IndexEntry{},
 		bloomFilter:   bloom.NewWithEstimates(uint(expectedEntries), 0.01),
 		indexInterval: DefaultIndexInterval,
@@ -95,15 +98,14 @@ func (w *SSTableWriter) writeFromMemTable(mt *MemTable) error {
 		return writeErr == nil
 	})
 
+	if writeErr == nil {
+		writeErr = w.writeMetadata()
+	}
 	if writeErr != nil {
+		w.close()
 		return writeErr
 	}
-
-	if err := w.writeMetadata(); err != nil {
-		return err
-	}
-
-	return w.file.Close()
+	return w.finish()
 }
 
 func (w *SSTableWriter) writeMetadata() error {
@@ -180,8 +182,36 @@ func (w *SSTableWriter) writeEntry(key, value []byte) error {
 	return nil
 }
 
+// finish makes the table durable and only then gives it its real name.
+func (w *SSTableWriter) finish() error {
+	if err := w.file.Sync(); err != nil {
+		w.close()
+		return err
+	}
+	if err := w.file.Close(); err != nil {
+		os.Remove(w.path + ".tmp")
+		return err
+	}
+	if err := os.Rename(w.path+".tmp", w.path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(w.path))
+}
+
+// close abandons an unfinished table.
 func (w *SSTableWriter) close() error {
-	return w.file.Close()
+	w.file.Close()
+	return os.Remove(w.path + ".tmp")
+}
+
+// syncDir makes a rename or remove inside dir survive a power cut.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 type SSTableReader struct {

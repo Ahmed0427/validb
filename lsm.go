@@ -43,6 +43,10 @@ func newLevelManager(basePath string, maxFilesPerLevel []int) (*levelManager, er
 
 	for _, e := range entries {
 		name := e.Name()
+		if filepath.Ext(name) == ".tmp" {
+			os.Remove(filepath.Join(basePath, name))
+			continue
+		}
 		if filepath.Ext(name) != ".sst" {
 			continue
 		}
@@ -215,7 +219,6 @@ func (l *LSMTree) flush() error {
 		return err
 	}
 	if err := w.writeFromMemTable(l.memTable); err != nil {
-		os.Remove(path)
 		return err
 	}
 
@@ -296,7 +299,6 @@ func (l *LSMTree) compact(level int) error {
 
 		if err := w.writeEntry(item.key, item.value); err != nil {
 			w.close()
-			os.Remove(newPath)
 			return err
 		}
 		lastKey = item.key
@@ -305,16 +307,17 @@ func (l *LSMTree) compact(level int) error {
 
 	if err := w.writeMetadata(); err != nil {
 		w.close()
-		os.Remove(newPath)
 		return err
 	}
-	w.close()
+
+	if err := w.finish(); err != nil {
+		return err
+	}
 
 	for _, name := range files {
 		l.levelMan.remove(level, name)
 		oldPath := filepath.Join(l.basePath, name)
-		if err := os.Remove(oldPath); err != nil {
-		}
+		os.Remove(oldPath)
 	}
 
 	l.levelMan.add(level+1, newName)
